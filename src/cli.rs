@@ -192,6 +192,13 @@ pub enum Command {
         action: Option<MilestoneAction>,
     },
 
+    /// Cross-project milestone timing statistics (used to improve new ETAs).
+    Stats {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Send or inspect notifications (Telegram, desktop, webhook).
     Notify {
         #[command(subcommand)]
@@ -520,6 +527,12 @@ mod tests {
         ));
         let cli = Cli::try_parse_from(["mox", "attention"]).unwrap();
         assert!(matches!(cli.command, Command::Check { .. }));
+    }
+
+    #[test]
+    fn parses_stats() {
+        let cli = Cli::try_parse_from(["mox", "stats", "--json"]).unwrap();
+        assert!(matches!(cli.command, Command::Stats { json: true }));
     }
 
     #[test]

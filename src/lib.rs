@@ -31,6 +31,7 @@ pub mod runner;
 pub mod scaffold;
 pub mod scheduler;
 pub mod state;
+pub mod stats;
 pub mod util;
 pub mod verify;
 pub mod vps;

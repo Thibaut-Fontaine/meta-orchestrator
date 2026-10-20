@@ -20,6 +20,7 @@ use crate::runner::{self, ProjectRun};
 use crate::scaffold::scaffold_project;
 use crate::scheduler::Scheduler;
 use crate::state::{self, State};
+use crate::stats;
 use crate::util::{display_path, human_mb, now_rfc3339, tail_lines, truncate_chars};
 use crate::vps::{self, HostCapacity};
 use anyhow::{bail, Context, Result};
@@ -172,6 +173,7 @@ impl App {
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
             Command::Notify { action } => self.cmd_notify(action, out),
+            Command::Stats { json } => self.cmd_stats(json, out),
             Command::Check {
                 action,
                 json,
@@ -299,6 +301,11 @@ impl App {
     }
 
     fn cmd_doctor(&mut self, skip_vps: bool, out: &mut dyn Write) -> Result<()> {
+        writeln!(
+            out,
+            "host: {}",
+            crate::host::HostProfile::detect().describe()
+        )?;
         let mut failures = 0usize;
         let mut checks: Vec<(bool, String)> = Vec::new();
 
@@ -429,7 +436,10 @@ impl App {
             )?;
             let host = crate::host::HostProfile::detect();
             host_profile = Some(host.clone());
-            let prompt = prompts::questions_prompt(&self.cfg, &ideas, &host);
+            let stats_summary =
+                stats::load_optional(&self.cfg.stats_file()).map(|store| stats::summarize(&store));
+            let prompt =
+                prompts::questions_prompt(&self.cfg, &ideas, &host, stats_summary.as_ref());
             let reply = self
                 .brain
                 .think(&prompt, self.cfg.brain_timeout_secs)
@@ -1363,6 +1373,17 @@ impl App {
         if let Err(err) = self.notifier.send(&event) {
             let _ = writeln!(out, "warning: notification failed: {err:#}");
         }
+    }
+
+    fn cmd_stats(&mut self, json: bool, out: &mut dyn Write) -> Result<()> {
+        let store = stats::load(&self.cfg.stats_file())?;
+        let summary = stats::summarize(&store);
+        if json {
+            writeln!(out, "{}", serde_json::to_string_pretty(&summary)?)?;
+        } else {
+            write!(out, "{}", stats::render(&summary))?;
+        }
+        Ok(())
     }
 
     fn cmd_notify(&mut self, action: NotifyAction, out: &mut dyn Write) -> Result<()> {
@@ -2603,6 +2624,38 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].kind, EventKind::Checks);
         assert!(events[0].body.contains("Verify cron"));
+    }
+
+    #[test]
+    fn stats_command_reports_cross_project_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let mut store = stats::StatsStore::default();
+        store.records.push(stats::MilestoneRecord {
+            slug: "old".into(),
+            milestone: "m1".into(),
+            title: "old milestone".into(),
+            complexity: crate::model::Complexity::High,
+            estimate_secs: 100,
+            actual_secs: 250,
+            finished_at: Utc::now(),
+            cpu_ghz: 3.5,
+            logical_cores: 8,
+        });
+        stats::save(&app.cfg.stats_file(), &store).unwrap();
+        let mut out = Vec::new();
+        app.cmd_stats(false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("completed milestones: 1"), "{text}");
+        assert!(text.contains("high"), "{text}");
+        assert!(text.contains("2.50"), "{text}");
+
+        let mut json_out = Vec::new();
+        app.cmd_stats(true, &mut json_out).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
+        assert_eq!(value["samples"], 1);
+        assert_eq!(value["by_complexity"]["high"]["median_ratio"], 2.5);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub const STATE_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     #[serde(default = "default_version")]
     pub version: u32,

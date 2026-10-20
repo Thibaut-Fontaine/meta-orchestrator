@@ -232,6 +232,11 @@ impl Config {
         self.state_dir_path().join("checks.json")
     }
 
+    /// Cross-project milestone timing statistics.
+    pub fn stats_file(&self) -> PathBuf {
+        self.state_dir_path().join("stats.json")
+    }
+
     pub fn questions_file(&self) -> PathBuf {
         self.state_dir_path().join("QUESTIONS.md")
     }

@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.3.0** · 226 unit tests + 8 end-to-end tests · private repo,
+Status: **v0.4.0** · 238 unit tests + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -16,7 +16,9 @@ Status: **v0.3.0** · 226 unit tests + 8 end-to-end tests · private repo,
 | Notifications | Telegram bot + optional desktop/webhook; token only via env + 0600 curl config | ✅ |
 | Reminder delivery | `mox check notify` one-shot digest, suitable for a systemd **user** timer | ✅ |
 | Project tracking | Ordered milestones with sub-todos, complexity weights, estimates, transition times and a calibrated live ETA | ✅ |
-| Machine-aware planning | CPU model, cores and RAM are passed to the planner; algorithmic complexity + input scale inform estimates | ✅ |
+| Machine-aware planning | CPU model, physical/logical cores, max GHz and RAM are passed to the planner; algorithmic complexity + input scale inform estimates | ✅ |
+| Cross-project statistics | Completed milestone timings are stored under a lock; median actual/planned ratios by complexity seed the first-milestone ETA | ✅ |
+| Easy build | `./build.sh` (release, `--test`, `--debug`, `--install`, `--offline`) | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
 ordered by risk first, then by the original product vision.
@@ -292,9 +294,10 @@ can be reviewed from `mox report`.
 
 ## 5. Suggested next sprint
 
-Already shipped in v0.3.0: locks, private permissions, post-run verification,
+Already shipped in v0.4.0: locks, private permissions, post-run verification,
 `gh`/`ssh`/signal wrappers, one-time VPS approval, wall-clock cap, Telegram
-notifications, TDD/parallel/VPS rules, and milestone boards with live ETA.
+notifications, TDD/parallel/VPS rules, milestone boards with live ETA, host
+profiling and cross-project calibration.
 
 Next, in this order:
 
@@ -305,8 +308,11 @@ Next, in this order:
 5. **Rolling worker pool** instead of batch barriers (M2).
 6. **Compute-weighted cores** (still open: milestone complexity is tracked, but
    the scheduler still gives every project the same core share).
-7. **`mox status --verbose`** with `STATUS.md` + interrupted-run flags (M2).
-8. **VPS execution** (`--target vps`, rsync/ssh run, fetch back) (M4) — the
+7. **Stats refinements:** per-host filtering (workstation vs VPS), p50/p90
+   distributions, per-compute-class priors, and a `mox stats --reset` with
+   confirmation.
+8. **`mox status --verbose`** with `STATUS.md` + interrupted-run flags (M2).
+9. **VPS execution** (`--target vps`, rsync/ssh run, fetch back) (M4) — the
    largest remaining feature and the one that unlocks the original vision.
 
 ---

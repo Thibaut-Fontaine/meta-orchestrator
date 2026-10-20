@@ -12,8 +12,10 @@
 use crate::cli::MilestoneAction;
 use crate::config::Config;
 use crate::exec::{CommandRunner, RealRunner};
+use crate::host::HostProfile;
 use crate::model::{Complexity, MilestoneSpec, ProjectSpec};
 use crate::notify::{self, Event, EventKind};
+use crate::stats;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -104,7 +106,7 @@ pub struct MilestoneEvent {
     pub note: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     #[serde(default = "board_version")]
     pub version: u32,
@@ -114,6 +116,14 @@ pub struct Board {
     pub milestones: Vec<Milestone>,
     #[serde(default)]
     pub events: Vec<MilestoneEvent>,
+    /// Starting calibration for a brand-new project, learned from completed
+    /// milestones across all projects. 1.0 when there is no history.
+    #[serde(default = "default_prior")]
+    pub prior_factor: f64,
+}
+
+fn default_prior() -> f64 {
+    1.0
 }
 
 fn board_version() -> u32 {
@@ -122,6 +132,11 @@ fn board_version() -> u32 {
 
 /// Build the initial board from a plan specification.
 pub fn board_from_spec(spec: &ProjectSpec, now: DateTime<Utc>) -> Board {
+    board_from_spec_with_prior(spec, now, 1.0)
+}
+
+/// Build the initial board with a cross-project prior calibration.
+pub fn board_from_spec_with_prior(spec: &ProjectSpec, now: DateTime<Utc>, prior: f64) -> Board {
     let specs = if spec.milestones.is_empty() {
         fallback_for(spec)
     } else {
@@ -153,6 +168,7 @@ pub fn board_from_spec(spec: &ProjectSpec, now: DateTime<Utc>) -> Board {
             })
             .collect(),
         events: Vec::new(),
+        prior_factor: prior.clamp(0.25, 4.0),
     }
 }
 
@@ -457,7 +473,7 @@ pub fn progress(board: &Board, now: DateTime<Utc>) -> Progress {
     let calibration = if completed_planned > 0 && completed_actual > 0 {
         (completed_actual as f64 / completed_planned as f64).clamp(0.25, 4.0)
     } else {
-        1.0
+        board.prior_factor.clamp(0.25, 4.0)
     };
 
     let mut remaining = 0u64;
@@ -696,6 +712,7 @@ pub fn run(action: Option<MilestoneAction>, file: Option<PathBuf>) -> Result<()>
     let mut board = load(&path)?;
     let now = Utc::now();
     let mut transition: Option<String> = None;
+    let mut completed: Option<String> = None;
 
     match action {
         None | Some(MilestoneAction::Status) => {
@@ -710,9 +727,16 @@ pub fn run(action: Option<MilestoneAction>, file: Option<PathBuf>) -> Result<()>
             transition = Some(format!("started {id}"));
         }
         Some(MilestoneAction::Done { id, note }) => {
+            let was_done = board
+                .milestones
+                .iter()
+                .any(|m| m.id == id && m.status == MilestoneStatus::Done);
             done(&mut board, &id, &note, now)?;
             save(&path, &board)?;
             transition = Some(format!("completed {id}"));
+            if !was_done {
+                completed = Some(id);
+            }
         }
         Some(MilestoneAction::Block { id, note }) => {
             block(&mut board, &id, &note, now)?;
@@ -749,7 +773,22 @@ pub fn run(action: Option<MilestoneAction>, file: Option<PathBuf>) -> Result<()>
         print!("{}", render_progress(&board, Utc::now()));
         notify_transition(&board, &verb);
     }
+    if let Some(id) = completed {
+        record_stats(&board, &id);
+    }
     Ok(())
+}
+
+/// Append this completed milestone to the cross-project statistics.
+fn record_stats(board: &Board, id: &str) {
+    let Ok(cfg) = Config::load(None) else {
+        return;
+    };
+    let Some(milestone) = board.milestones.iter().find(|m| m.id == id) else {
+        return;
+    };
+    let host = HostProfile::detect();
+    let _ = stats::record(&cfg, &board.slug, milestone, &host, Utc::now());
 }
 
 /// Best-effort Telegram/desktop notification on a milestone transition.
@@ -976,6 +1015,30 @@ mod tests {
         assert_eq!(p.eta, None);
         assert_eq!(p.eta_label(), "done");
         assert_eq!(p.short(), "-/3 100%");
+    }
+
+    #[test]
+    fn prior_factor_calibrates_a_brand_new_project() {
+        let mut spec = spec();
+        spec.milestones = board()
+            .milestones
+            .iter()
+            .map(|m| crate::model::MilestoneSpec {
+                id: m.id.clone(),
+                title: m.title.clone(),
+                description: m.description.clone(),
+                todos: m.todos.iter().map(|t| t.text.clone()).collect(),
+                complexity: m.complexity,
+                algorithmic_complexity: m.algorithmic_complexity.clone(),
+                estimate_secs: m.estimate_secs,
+            })
+            .collect();
+        let board = board_from_spec_with_prior(&spec, now(), 2.0);
+        assert_eq!(board.prior_factor, 2.0);
+        let p = progress(&board, now());
+        assert!((p.calibration - 2.0).abs() < 0.001);
+        assert_eq!(p.remaining_secs, 7200);
+        assert_eq!(p.current_remaining_secs, Some(1200));
     }
 
     #[test]

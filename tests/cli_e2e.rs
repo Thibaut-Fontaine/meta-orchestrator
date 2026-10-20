@@ -517,6 +517,11 @@ fn milestones_drive_progress_and_eta() {
     assert!(started.contains("started m1"), "{started}");
     assert!(started.contains("current: m1"), "{started}");
 
+    // Pretend the milestone took five minutes so it produces a usable stat.
+    let mut board = milestones::load(&board_path).unwrap();
+    board.milestones[0].started_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
+    milestones::save(&board_path, &board).unwrap();
+
     h.run_ok_in(&project, &["milestone", "todo", "m1", "1"]);
     let done = h.run_ok_in(
         &project,
@@ -531,8 +536,18 @@ fn milestones_drive_progress_and_eta() {
         milestones::MilestoneStatus::Done
     );
     assert!(board.milestones[0].todos[0].done);
-    assert!(board.milestones[0].actual_secs < 10);
+    assert!(board.milestones[0].actual_secs >= 300);
     assert!(board.events.iter().any(|e| e.kind == "done"));
+
+    // The completed milestone feeds cross-project calibration.
+    let stats = h.run_ok(&["stats", "--json"]);
+    let stats: serde_json::Value = serde_json::from_str(&stats).unwrap();
+    assert_eq!(stats["samples"], 1, "{stats}");
+    let stats_text = h.run_ok(&["stats"]);
+    assert!(
+        stats_text.contains("completed milestones: 1"),
+        "{stats_text}"
+    );
 
     let status = h.run_ok_in(&project, &["milestone", "status"]);
     assert!(status.contains("1/3 milestones"), "{status}");

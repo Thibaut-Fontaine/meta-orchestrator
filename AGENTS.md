@@ -37,6 +37,13 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
    update them only through `mox milestone`, and the ETA math (weights,
    calibration, elapsed time, blocked state) stays deterministic and tested
    with a fixed `now`.
+10. Cross-project stats are append-only and written under a lock. The learned
+    prior must stay clamped (0.25–4×) and must never make a command fail.
+11. `./build.sh --test` is the supported build gate: fmt, clippy `-D warnings`,
+    unit + end-to-end tests, then the release binary.
+12. `mox` must stay an orchestrator: never run project builds, tests, code or
+    CPU benchmarks inside mox. Agents compute; mox schedules, tracks and
+    reports. Host probing only reads `/proc`.
 
 ## Engineering rules
 

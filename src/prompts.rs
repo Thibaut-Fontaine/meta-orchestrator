@@ -7,6 +7,7 @@
 use crate::config::Config;
 use crate::host::HostProfile;
 use crate::model::{Complexity, ComputeNeed, Idea, MilestoneSpec, ProjectSpec, Question};
+use crate::stats::Summary;
 use crate::util::{slug_from_idea, slugify, truncate_chars, unique_slug};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -29,7 +30,12 @@ pub fn planning_context(cfg: &Config) -> String {
 
 /// Prompt asking for clarifying questions and a first technical read of each
 /// idea.
-pub fn questions_prompt(cfg: &Config, ideas: &[Idea], host: &HostProfile) -> String {
+pub fn questions_prompt(
+    cfg: &Config,
+    ideas: &[Idea],
+    host: &HostProfile,
+    stats: Option<&Summary>,
+) -> String {
     let mut out = String::new();
     out.push_str(&planning_context(cfg));
     out.push_str(
@@ -85,7 +91,13 @@ pub fn questions_prompt(cfg: &Config, ideas: &[Idea], host: &HostProfile) -> Str
     );
     out.push_str("## Target machine\n");
     out.push_str(&host.planning_guidance());
-    out.push_str("\n\n## Ideas\n");
+    out.push_str("\n\n");
+    if let Some(line) = stats.and_then(crate::stats::prompt_line) {
+        out.push_str("## Historical calibration\n");
+        out.push_str(&line);
+        out.push_str("\n\n");
+    }
+    out.push_str("## Ideas\n");
     for (index, idea) in ideas.iter().enumerate() {
         out.push_str(&format!(
             "\n### Idea {} (slug hint: `{}`)\n{}\n",
@@ -597,6 +609,8 @@ mod tests {
         let host = HostProfile {
             cpu_model: "Test CPU".into(),
             cores: 8,
+            physical_cores: 4,
+            cpu_mhz: 3000.0,
             mem_mb: 16_000,
             arch: "x86_64".into(),
         };
@@ -604,6 +618,7 @@ mod tests {
             &cfg,
             &[idea("One", "first idea"), idea("Two", "second idea")],
             &host,
+            None,
         );
         assert!(prompt.contains("first idea"));
         assert!(prompt.contains("second idea"));
@@ -615,6 +630,35 @@ mod tests {
         assert!(prompt.contains("\"algorithmic_complexity\""));
         assert!(prompt.contains("Test CPU"));
         assert!(prompt.contains("input scale"));
+    }
+
+    #[test]
+    fn questions_prompt_includes_historical_calibration() {
+        use crate::stats::{Bucket, Summary};
+        let cfg = Config::default();
+        let host = HostProfile::default();
+        let mut by_complexity = std::collections::BTreeMap::new();
+        by_complexity.insert(
+            "medium".to_string(),
+            Bucket {
+                samples: 3,
+                mean_ratio: 1.3,
+                median_ratio: 1.2,
+            },
+        );
+        let summary = Summary {
+            samples: 3,
+            overall: Bucket {
+                samples: 3,
+                mean_ratio: 1.3,
+                median_ratio: 1.2,
+            },
+            by_complexity,
+        };
+        let prompt = questions_prompt(&cfg, &[idea("One", "x")], &host, Some(&summary));
+        assert!(prompt.contains("## Historical calibration"));
+        assert!(prompt.contains("1.20×"));
+        assert!(prompt.contains("medium"));
     }
 
     #[test]

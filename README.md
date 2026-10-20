@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 226 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 238 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -45,10 +45,15 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
 
 ```bash
 cd ~/meta-orchestrator
-cargo build --release
-./target/release/mox init
-./target/release/mox doctor
+./build.sh                 # release build
+./build.sh --test          # fmt + clippy + tests + release
+./build.sh --install       # build and copy to ~/.local/bin/mox
+./build.sh --debug         # fast debug build
+./build.sh --offline       # use the local cargo cache only
 ```
+
+`build.sh` only builds mox; it does not run project code or a benchmark.
+After building: `mox init && mox doctor`.
 
 `mox init` writes `~/.config/meta-orchestrator/config.toml` (mode 0600) and
 creates `~/mox-projects` plus its internal `.mox/` cache/log tree.
@@ -97,6 +102,7 @@ Useful flags:
 | `mox --run-timeout 1800 up` | wall-clock cap per agent run (seconds) |
 | `mox status` | table with milestone progress and ETA |
 | `mox status --watch` | live table, refreshed every 10 s |
+| `mox stats` | cross-project milestone timing statistics (`--json` too) |
 | `mox milestone status` | detailed progress/ETA for the project in the current dir |
 | `mox milestone list` | milestones, todos, estimates, complexity, algorithms |
 | `mox milestone start m1` / `done m1 --note …` | record a transition |
@@ -187,6 +193,15 @@ Channels (all off by default):
 * **Webhook**: `notify_webhook = true` + `webhook_url = "https://…"`; the URL is
   kept out of argv too (ntfy, a custom bot, a Slack proxy...).
 
+## Design boundary
+
+`mox` is an orchestrator, not a worker: it plans, schedules, pins agents to
+threads, records progress and ETA, and reports. It never builds or runs project
+code and never runs a CPU benchmark. All actual computation happens in OpenCode
+agents, each on its own cores. The only "measurement" mox does is reading
+`/proc` for the host profile and observing real milestone durations after the
+fact.
+
 ## Milestones, progress and ETA
 
 Every project is planned as **3–6 ordered milestones**. Each milestone has:
@@ -230,16 +245,26 @@ How the ETA is computed:
 4. a blocked milestone makes the ETA unavailable (`blocked`);
 5. a milestone without an estimate falls back to 30 minutes per weight unit.
 
-Planning is **machine-aware**: the planning prompt receives the CPU model, core
-count, RAM and architecture of this workstation, so the model sizes milestones
-for the hardware it will actually run on (`mox plan` prints `estimates for:
-<CPU> · N cores · …`). **Algorithmic complexity is a planning input, not a
-runtime formula**: the model is asked to state the expected input scale (for
-example `O(n log n), n≈10k rows`) and derive its minute estimate from it. The
-ETA itself uses that estimate plus the measured actual/planned calibration.
-There is no synthetic CPU benchmark: different workloads (compilation, network,
-data volume) do not correlate with one score, and real milestone timings are the
-better signal.
+Planning is **machine-aware**: the planning prompt receives the CPU model,
+physical/logical cores, maximum clock (GHz), RAM and architecture, so the model
+sizes milestones for the hardware it will actually run on (`mox plan` prints
+`estimates for: <CPU> · 4 physical / 8 logical cores · up to 3.5 GHz · …`).
+**Algorithmic complexity is a planning input, not a runtime formula**: the model
+is asked to state the expected input scale (for example `O(n log n), n≈10k rows`)
+and derive its minute estimate from it. The ETA itself uses that estimate plus
+measured calibration. There is no synthetic CPU benchmark: different workloads
+(compilation, network, data volume) do not correlate with one score, and real
+milestone timings are the better signal.
+
+### Cross-project calibration
+
+Every completed milestone is appended to `~/.local/state/meta-orchestrator/stats.json`
+under a lock (safe when several agents finish at once). `mox stats` summarises
+the median `actual / planned` ratio overall and per complexity class. New
+projects start with a weighted prior from that history, so the **first**
+milestone ETA is already informed by how long similar work took on this machine;
+once the project finishes its own milestones, its local calibration takes over.
+Recording is silent (errors never fail a milestone) and capped at 2000 samples.
 
 The board is the contract: `mox status --watch` polls it (side-by-side with the
 checks sidebar), `mox up` prints it after each wave, `mox status --json` exposes
@@ -332,6 +357,7 @@ CPU:
 ├── plan.json                # cached specs
 ├── answers.toml             # editable answers
 ├── checks.json              # human attention queue
+├── stats.json               # cross-project milestone timings
 └── QUESTIONS.md
 ```
 
@@ -373,8 +399,9 @@ webhook_url = ""
 ```
 
 `MOX_DRY_RUN=1` is equivalent to `--dry-run`; `--run-timeout` overrides the cap
-for one command. The ETA calibration is internal (0.25–4×); no configuration is
-needed.
+for one command. ETA calibration (0.25–4×) and the cross-project prior are
+internal; no configuration is needed. Delete `stats.json` to reset the learned
+prior.
 
 ## Architecture (why it is testable)
 
@@ -394,13 +421,15 @@ needed.
 | `lock` | exclusive locks with stale-owner reclaim |
 | `verify` | post-run dirty-tree / unpushed-commit verification |
 | `milestones` | boards, transitions, weighted progress and ETA |
+| `stats` | cross-project timing history and the first-milestone prior |
+| `host` | CPU model/cores/GHz/RAM passed to the planner |
 | `notify` | Telegram, desktop and webhook channels (secrets out of argv) |
 | `app` / `cli` | commands and argument parsing |
 
 Testing:
 
 ```bash
-cargo test                 # 226 unit + 8 end-to-end tests
+cargo test                 # 238 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

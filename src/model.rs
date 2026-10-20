@@ -257,7 +257,7 @@ impl ProjectSpec {
 }
 
 /// The whole plan: every project the user asked for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Plan {
     #[serde(default)]
     pub created_at: String,

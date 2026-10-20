@@ -246,7 +246,12 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
     // The live progress board. Agents update it with `mox milestone`.
     let board_file = crate::milestones::board_path(&path);
     if !board_file.exists() {
-        let board = crate::milestones::board_from_spec(spec, Utc::now());
+        // Start from cross-project calibration when history exists.
+        let prior = crate::stats::load_optional(&cfg.stats_file())
+            .map(|store| crate::stats::summarize(&store))
+            .map(|summary| crate::stats::prior_for_spec(&summary, spec))
+            .unwrap_or(1.0);
+        let board = crate::milestones::board_from_spec_with_prior(spec, Utc::now(), prior);
         crate::milestones::save(&board_file, &board)?;
         created.push(board_file);
     }
@@ -390,6 +395,7 @@ mod tests {
     fn cfg(root: &Path) -> Config {
         Config {
             projects_root: root.to_string_lossy().to_string(),
+            state_dir: root.join("state").to_string_lossy().to_string(),
             ..Config::default()
         }
     }
@@ -438,6 +444,29 @@ mod tests {
         assert!(task.contains("## Milestones"));
         assert!(task.contains("m1"));
         assert!(task.contains("mox milestone"));
+    }
+
+    #[test]
+    fn board_starts_with_cross_project_prior() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg(dir.path());
+        let mut store = crate::stats::StatsStore::default();
+        store.records.push(crate::stats::MilestoneRecord {
+            slug: "old".into(),
+            milestone: "m1".into(),
+            title: "old".into(),
+            complexity: crate::model::Complexity::Medium,
+            estimate_secs: 100,
+            actual_secs: 200,
+            finished_at: chrono::Utc::now(),
+            cpu_ghz: 3.5,
+            logical_cores: 8,
+        });
+        crate::stats::save(&cfg.stats_file(), &store).unwrap();
+
+        scaffold_project(&cfg, &spec()).unwrap();
+        let board = crate::milestones::load(&dir.path().join("demo/MILESTONES.json")).unwrap();
+        assert_eq!(board.prior_factor, 2.0);
     }
 
     #[test]
