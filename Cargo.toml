@@ -1,0 +1,31 @@
+[package]
+name = "meta-orchestrator"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Parallel OpenCode project orchestrator: ideas -> questions -> specs -> private repos -> isolated agents"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "mox"
+path = "src/main.rs"
+
+[lib]
+name = "meta_orchestrator"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+incremental = true

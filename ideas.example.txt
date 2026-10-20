@@ -1,0 +1,8 @@
+# One idea per line.
+# Optional explicit title before "::". Indented lines continue the previous idea.
+# Lines starting with # are ignored.
+
+- Expense tracker :: a CLI that logs expenses and prints monthly reports
+- Note search :: semantic search over my markdown notes, fully local
+  It should run offline and index new files incrementally.
+- VPS dashboard :: a small read-only web page showing CPU, RAM and disk of vps-ovh

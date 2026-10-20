@@ -1,0 +1,264 @@
+//! Command-line interface definition (clap).
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mox",
+    version,
+    about = "Parallel OpenCode project orchestrator",
+    long_about = "Turns project ideas into clarifying questions, specs, private GitHub \
+                  repositories and isolated parallel OpenCode agents.\n\n\
+                  Typical flow:\n  mox plan --ideas ideas.txt\n  mox up\n  mox status"
+)]
+pub struct Cli {
+    /// Config file (default: ~/.config/meta-orchestrator/config.toml).
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// Override the projects root directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub projects_root: Option<PathBuf>,
+
+    /// Show what would happen without creating files or running commands.
+    #[arg(long, global = true)]
+    pub dry_run: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Create the config file and the projects/cache directories.
+    Init {
+        /// Overwrite an existing config file.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Check the local environment (tools, auth, disk, VPS, cores).
+    Doctor {
+        /// Skip the SSH probe.
+        #[arg(long)]
+        skip_vps: bool,
+    },
+
+    /// Turn ideas into questions and a written plan.
+    Plan {
+        /// Ideas file (`-` for stdin).
+        #[arg(long, value_name = "FILE")]
+        ideas: Option<PathBuf>,
+
+        /// Answers file to apply (`answers.toml`).
+        #[arg(long, value_name = "FILE")]
+        answers: Option<PathBuf>,
+
+        /// Ask the brain again instead of reusing the cached plan.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Do not ask questions interactively; use defaults.
+        #[arg(long)]
+        yes: bool,
+
+        /// Force interactive questions even when stdin is not a TTY.
+        #[arg(long)]
+        interactive: bool,
+    },
+
+    /// Create workspaces, private GitHub repos, then run agents in parallel.
+    Up {
+        /// Only handle these slugs (repeatable). Default: every project.
+        #[arg(long = "only", value_name = "SLUG")]
+        only: Vec<String>,
+
+        /// Override the number of simultaneous agents.
+        #[arg(long, value_name = "N")]
+        max_parallel: Option<usize>,
+
+        /// Do not create or push GitHub repositories.
+        #[arg(long)]
+        no_github: bool,
+
+        /// Scaffold and publish only; do not launch agents.
+        #[arg(long)]
+        no_run: bool,
+
+        /// Ignore the free-disk floor.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show the state of every project.
+    Status {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the tail of a project's agent log.
+    Logs {
+        /// Project slug.
+        slug: String,
+
+        /// Number of lines.
+        #[arg(short = 'n', long, default_value_t = 60)]
+        lines: usize,
+    },
+
+    /// Review one finished run and write REFLECTION.md.
+    Reflect {
+        /// Project slug.
+        slug: String,
+
+        /// Log lines to include in the reflection prompt.
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+    },
+
+    /// Report or remove caches and build output.
+    Clean {
+        /// Actually delete files (default is a dry run).
+        #[arg(long)]
+        apply: bool,
+
+        /// Also delete build output (target/, dist/, build/).
+        #[arg(long)]
+        all: bool,
+
+        /// Delete even if an agent might be running.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Stop a running agent.
+    Stop {
+        /// Project slug.
+        slug: String,
+    },
+
+    /// Inspect the VPS or get an execution-target recommendation.
+    Vps {
+        #[command(subcommand)]
+        action: VpsCommand,
+    },
+
+    /// Parse and validate an ideas file without planning.
+    Ideas {
+        /// Ideas file (`-` for stdin).
+        file: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VpsCommand {
+    /// Read-only capacity and reachability check.
+    Check,
+    /// Recommend where a workload of this size should run.
+    Suggest {
+        /// light, medium, heavy or gpu.
+        #[arg(long, default_value = "medium")]
+        compute: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_plan_flags() {
+        let cli = Cli::try_parse_from([
+            "mox",
+            "--dry-run",
+            "plan",
+            "--ideas",
+            "ideas.txt",
+            "--answers",
+            "answers.toml",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(cli.dry_run);
+        match cli.command {
+            Command::Plan {
+                ideas,
+                answers,
+                yes,
+                ..
+            } => {
+                assert_eq!(ideas.unwrap().to_str().unwrap(), "ideas.txt");
+                assert_eq!(answers.unwrap().to_str().unwrap(), "answers.toml");
+                assert!(yes);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_up_filters() {
+        let cli = Cli::try_parse_from([
+            "mox",
+            "up",
+            "--only",
+            "alpha",
+            "--only",
+            "beta",
+            "--max-parallel",
+            "2",
+            "--no-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Up {
+                only,
+                max_parallel,
+                no_run,
+                ..
+            } => {
+                assert_eq!(only, vec!["alpha", "beta"]);
+                assert_eq!(max_parallel, Some(2));
+                assert!(no_run);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_clean_and_vps() {
+        let cli = Cli::try_parse_from(["mox", "clean", "--apply", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Clean {
+                apply: true,
+                all: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "vps", "suggest", "--compute", "heavy"]).unwrap();
+        match cli.command {
+            Command::Vps {
+                action: VpsCommand::Suggest { compute },
+            } => assert_eq!(compute, "heavy"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_subcommand() {
+        assert!(Cli::try_parse_from(["mox", "frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn global_config_flag_before_or_after_subcommand() {
+        let before = Cli::try_parse_from(["mox", "--config", "/tmp/c.toml", "status"]).unwrap();
+        let after = Cli::try_parse_from(["mox", "status", "--config", "/tmp/c.toml"]).unwrap();
+        assert_eq!(
+            before.config.unwrap().to_str().unwrap(),
+            after.config.unwrap().to_str().unwrap()
+        );
+    }
+}
