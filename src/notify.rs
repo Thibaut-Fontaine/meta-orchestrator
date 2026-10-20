@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 #[serde(rename_all = "lowercase")]
 pub enum EventKind {
     Questions,
+    Progress,
     Finished,
     Failed,
     Checks,
@@ -29,6 +30,7 @@ impl EventKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             EventKind::Questions => "questions",
+            EventKind::Progress => "progress",
             EventKind::Finished => "finished",
             EventKind::Failed => "failed",
             EventKind::Checks => "checks",

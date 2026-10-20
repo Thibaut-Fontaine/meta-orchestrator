@@ -95,11 +95,19 @@ pub enum Command {
         force: bool,
     },
 
-    /// Show the state of every project.
+    /// Show the state of every project, with milestone progress and ETA.
     Status {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+
+        /// Refresh continuously (Ctrl-C to quit).
+        #[arg(long)]
+        watch: bool,
+
+        /// Refresh interval in seconds.
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
     },
 
     /// Print the tail of a project's agent log.
@@ -174,6 +182,16 @@ pub enum Command {
         no_sync: bool,
     },
 
+    /// Track milestones, progress and ETA for the project in the current dir.
+    Milestone {
+        /// Board file (default: ./MILESTONES.json).
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+
+        #[command(subcommand)]
+        action: Option<MilestoneAction>,
+    },
+
     /// Send or inspect notifications (Telegram, desktop, webhook).
     Notify {
         #[command(subcommand)]
@@ -200,6 +218,57 @@ pub enum Command {
         /// Original arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MilestoneAction {
+    /// Progress and ETA (default when no action is given).
+    Status,
+    /// List milestones and their open todos.
+    List,
+    /// Mark a milestone as in progress.
+    Start {
+        /// Milestone id, e.g. m1.
+        id: String,
+    },
+    /// Mark a milestone as done (records actual time).
+    Done {
+        /// Milestone id.
+        id: String,
+        /// Short outcome note.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Mark a milestone as blocked; the ETA becomes unavailable.
+    Block {
+        /// Milestone id.
+        id: String,
+        /// Why it is blocked.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Skip a milestone (excluded from progress/ETA).
+    Skip {
+        /// Milestone id.
+        id: String,
+    },
+    /// Tick or untick a sub-todo (1-based index).
+    Todo {
+        /// Milestone id.
+        id: String,
+        /// 1-based todo index (see `mox milestone list`).
+        index: usize,
+        /// Reopen the todo instead of marking it done.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Add a sub-todo to a milestone.
+    AddTodo {
+        /// Milestone id.
+        id: String,
+        /// Todo text.
+        text: String,
     },
 }
 
@@ -451,6 +520,74 @@ mod tests {
         ));
         let cli = Cli::try_parse_from(["mox", "attention"]).unwrap();
         assert!(matches!(cli.command, Command::Check { .. }));
+    }
+
+    #[test]
+    fn parses_status_watch() {
+        let cli = Cli::try_parse_from(["mox", "status", "--watch", "--interval", "5"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                watch: true,
+                interval: 5,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_milestone_commands() {
+        let cli = Cli::try_parse_from(["mox", "milestone"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Milestone {
+                action: None,
+                file: None
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "mox",
+            "milestone",
+            "--file",
+            "/tmp/M.json",
+            "done",
+            "m2",
+            "--note",
+            "shipped",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Milestone {
+                file,
+                action: Some(MilestoneAction::Done { id, note }),
+            } => {
+                assert_eq!(file.unwrap().to_str().unwrap(), "/tmp/M.json");
+                assert_eq!(id, "m2");
+                assert_eq!(note, "shipped");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["mox", "milestone", "todo", "m1", "2", "--undo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Milestone {
+                action: Some(MilestoneAction::Todo {
+                    index: 2,
+                    undo: true,
+                    ..
+                }),
+                ..
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["mox", "milestone", "add-todo", "m1", "write tests"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Milestone {
+                action: Some(MilestoneAction::AddTodo { .. }),
+                ..
+            }
+        ));
     }
 
     #[test]

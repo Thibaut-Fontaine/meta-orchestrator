@@ -64,6 +64,9 @@ pub fn verify(runner: &dyn CommandRunner, cfg: &Config, dir: &Path) -> Verificat
             .stdout
             .lines()
             .filter(|line| !line.trim().is_empty())
+            // The live progress board is metadata updated by `mox milestone`;
+            // it is not a reason to fail a run that committed its code.
+            .filter(|line| !line.trim_end().ends_with(crate::milestones::BOARD_FILE))
             .count(),
         Ok(output) => {
             return Verification {
@@ -198,6 +201,33 @@ mod tests {
         assert_eq!(result.dirty_files, 2);
         assert!(!result.is_clean());
         assert!(result.reason().unwrap().contains("2 uncommitted"));
+    }
+
+    #[test]
+    fn ignores_a_dirty_progress_board() {
+        let runner = FakeRunner::new(|spec| {
+            if spec.args.contains(&"status".to_string()) {
+                return Output {
+                    code: Some(0),
+                    stdout: " M MILESTONES.json\n".into(),
+                    ..Output::default()
+                };
+            }
+            if spec.args.contains(&"@{u}".to_string()) {
+                return Output {
+                    code: Some(0),
+                    stdout: "origin/main\n".into(),
+                    ..Output::default()
+                };
+            }
+            Output {
+                code: Some(0),
+                stdout: "0\n".into(),
+                ..Output::default()
+            }
+        });
+        let result = verify(&runner, &cfg(), Path::new("/tmp/x"));
+        assert!(result.is_clean(), "{result:?}");
     }
 
     #[test]

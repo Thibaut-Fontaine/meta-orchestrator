@@ -6,6 +6,7 @@ use meta_orchestrator::cli::Cli;
 use meta_orchestrator::config::{default_config_path, Config};
 use meta_orchestrator::exec::RealRunner;
 use meta_orchestrator::guard;
+use meta_orchestrator::milestones;
 use meta_orchestrator::notify;
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -21,6 +22,15 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     if let meta_orchestrator::cli::Command::Guard { program, args } = &cli.command {
         guard::dispatch(program, args);
+    }
+    if matches!(
+        &cli.command,
+        meta_orchestrator::cli::Command::Milestone { .. }
+    ) {
+        let meta_orchestrator::cli::Command::Milestone { file, action } = cli.command else {
+            unreachable!("checked above");
+        };
+        return milestones::run(action, file);
     }
     let cfg_path = cli.config.clone().unwrap_or_else(default_config_path);
     let mut cfg = Config::load(Some(&cfg_path))?;

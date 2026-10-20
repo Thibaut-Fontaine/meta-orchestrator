@@ -33,6 +33,10 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
 8. Agent guard decisions are a tested contract. Any new allow/deny rule needs a
    positive and a negative test, and must never be bypassable by the wrapper
    itself (no relative "real" binary, no recursion).
+9. Milestone boards (`MILESTONES.json`) are the progress contract: agents
+   update them only through `mox milestone`, and the ETA math (weights,
+   calibration, elapsed time, blocked state) stays deterministic and tested
+   with a fixed `now`.
 
 ## Engineering rules
 

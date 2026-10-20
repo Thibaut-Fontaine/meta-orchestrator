@@ -21,6 +21,7 @@ pub mod github;
 pub mod guard;
 pub mod ideas;
 pub mod lock;
+pub mod milestones;
 pub mod model;
 pub mod notify;
 pub mod prompts;

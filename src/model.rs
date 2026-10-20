@@ -49,6 +49,75 @@ impl std::str::FromStr for ComputeNeed {
     }
 }
 
+/// Relative difficulty of one milestone, used to weight progress and ETA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Complexity {
+    Low,
+    #[default]
+    Medium,
+    High,
+    VeryHigh,
+}
+
+impl Complexity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Complexity::Low => "low",
+            Complexity::Medium => "medium",
+            Complexity::High => "high",
+            Complexity::VeryHigh => "very-high",
+        }
+    }
+
+    /// Weight used by the progress/ETA calculation.
+    pub fn weight(&self) -> u32 {
+        match self {
+            Complexity::Low => 1,
+            Complexity::Medium => 2,
+            Complexity::High => 3,
+            Complexity::VeryHigh => 5,
+        }
+    }
+}
+
+impl std::str::FromStr for Complexity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "low" | "trivial" | "easy" => Ok(Complexity::Low),
+            "medium" | "normal" => Ok(Complexity::Medium),
+            "high" | "hard" => Ok(Complexity::High),
+            "very-high" | "veryhigh" | "critical" => Ok(Complexity::VeryHigh),
+            other => Err(format!(
+                "unknown complexity `{other}` (use low, medium, high or very-high)"
+            )),
+        }
+    }
+}
+
+/// One milestone in the plan (no runtime state; see `milestones::Milestone`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MilestoneSpec {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub todos: Vec<String>,
+    #[serde(default)]
+    pub complexity: Complexity,
+    /// Big-O style note when the milestone involves a non-trivial algorithm.
+    #[serde(default)]
+    pub algorithmic_complexity: String,
+    /// Planned duration in seconds.
+    #[serde(default)]
+    pub estimate_secs: u64,
+}
+
 /// One raw project idea supplied by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Idea {
@@ -103,6 +172,8 @@ pub struct ProjectSpec {
     pub needs_vps: bool,
     #[serde(default)]
     pub estimated_disk_mb: u64,
+    #[serde(default)]
+    pub milestones: Vec<MilestoneSpec>,
 }
 
 impl ProjectSpec {
@@ -127,6 +198,7 @@ impl ProjectSpec {
             compute: ComputeNeed::Light,
             needs_vps: false,
             estimated_disk_mb: 512,
+            milestones: Vec::new(),
         }
     }
 
@@ -312,6 +384,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn complexity_weights_and_parsing() {
+        assert_eq!("very-high".parse::<Complexity>().unwrap().weight(), 5);
+        assert_eq!("LOW".parse::<Complexity>().unwrap().weight(), 1);
+        assert!("nope".parse::<Complexity>().is_err());
+        assert_eq!(Complexity::High.as_str(), "high");
+    }
+
+    #[test]
     fn compute_need_parsing() {
         assert_eq!("Heavy".parse::<ComputeNeed>().unwrap(), ComputeNeed::Heavy);
         assert_eq!("low".parse::<ComputeNeed>().unwrap(), ComputeNeed::Light);
@@ -329,6 +409,7 @@ mod tests {
         assert_eq!(spec.title, "Budget Buddy");
         assert_eq!(spec.slug, "budget-buddy");
         assert_eq!(spec.estimated_disk_mb, 512);
+        assert!(spec.milestones.is_empty());
     }
 
     #[test]

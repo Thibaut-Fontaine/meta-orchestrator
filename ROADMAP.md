@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.2.0** · 199 unit tests + 7 end-to-end tests · private repo,
+Status: **v0.3.0** · 222 unit tests + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -15,6 +15,7 @@ Status: **v0.2.0** · 199 unit tests + 7 end-to-end tests · private repo,
 | Wall-clock cap | Per-run cap, default 7200 s, `--run-timeout` override, duration recorded | ✅ |
 | Notifications | Telegram bot + optional desktop/webhook; token only via env + 0600 curl config | ✅ |
 | Reminder delivery | `mox check notify` one-shot digest, suitable for a systemd **user** timer | ✅ |
+| Project tracking | Ordered milestones with sub-todos, complexity weights, estimates, transition times and a calibrated live ETA | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
 ordered by risk first, then by the original product vision.
@@ -174,6 +175,9 @@ Goal: stop wasting tokens and wall-clock time; make projects manageable.
       core and a configurable cap. *(P0, S)*
 - [x] Wall-clock cap per run, configurable with `--run-timeout`, duration
       recorded and shown in `status`. *(P1, S)*
+- [x] Milestone boards with sub-todos, complexity weights, algorithmic notes,
+      estimates, transition timestamps and a calibrated ETA in `status`,
+      `status --json`, `status --watch` and after each `up` wave. *(P1, M)*
 - [ ] Post-answers **second brain pass**: synthesize final summary, acceptance
       criteria, risks and a `TASKS.md` checklist from questions + answers.
       `mox plan --refresh` re-runs it; `mox spec show --slug` prints it.
@@ -287,9 +291,9 @@ can be reviewed from `mox report`.
 
 ## 5. Suggested next sprint
 
-Already shipped in v0.2.0: locks, private permissions, post-run verification,
+Already shipped in v0.3.0: locks, private permissions, post-run verification,
 `gh`/`ssh`/signal wrappers, one-time VPS approval, wall-clock cap, Telegram
-notifications, TDD/parallel/VPS rules in every prompt.
+notifications, TDD/parallel/VPS rules, and milestone boards with live ETA.
 
 Next, in this order:
 
@@ -298,8 +302,9 @@ Next, in this order:
 3. **Pre-commit hook** for large files and secrets (finish M1).
 4. **`mox up --resume` / `--retry-failed`** (M2).
 5. **Rolling worker pool** instead of batch barriers (M2).
-6. **Compute-weighted cores** (M2).
-7. **`mox status --verbose`** with `STATUS.md` + stale-run flags (M2).
+6. **Compute-weighted cores** (still open: milestone complexity is tracked, but
+   the scheduler still gives every project the same core share).
+7. **`mox status --verbose`** with `STATUS.md` + interrupted-run flags (M2).
 8. **VPS execution** (`--target vps`, rsync/ssh run, fetch back) (M4) — the
    largest remaining feature and the one that unlocks the original vision.
 

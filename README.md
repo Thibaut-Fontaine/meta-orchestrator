@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 199 unit tests + 7 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 222 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -31,11 +31,14 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
    agent per project with `opencode run --auto`.
 4. **`mox status` / `mox logs` / `mox reflect`** follow progress; `mox clean`
    reclaims disk; `mox stop` stops one agent safely.
-5. **`mox check`** is the human-attention queue: agents append what they cannot
+5. **`mox milestone`** tracks each project as ordered milestones with sub-todos,
+   complexity weights and time estimates; `mox status` turns that into live
+   progress and an ETA. Agents start/finish milestones as they work.
+6. **`mox check`** is the human-attention queue: agents append what they cannot
    verify (VPS cron, API key/quota, deploy, data sample) to `CHECKS.md`, and the
    queue shows what to check **now, today, soon, later**, with a live
    `--watch` sidebar.
-6. **`mox vps check` / `mox vps suggest`** decide whether a workload fits the
+7. **`mox vps check` / `mox vps suggest`** decide whether a workload fits the
    workstation, the existing VPS, or needs an OVHcloud remote plan.
 
 ## Install
@@ -92,6 +95,13 @@ Useful flags:
 | `mox up --no-run` | scaffold + publish, launch nothing |
 | `mox up --max-parallel 3` | override concurrency |
 | `mox --run-timeout 1800 up` | wall-clock cap per agent run (seconds) |
+| `mox status` | table with milestone progress and ETA |
+| `mox status --watch` | live table, refreshed every 10 s |
+| `mox milestone status` | detailed progress/ETA for the project in the current dir |
+| `mox milestone list` | milestones, todos, estimates, complexity, algorithms |
+| `mox milestone start m1` / `done m1 --note …` | record a transition |
+| `mox milestone todo m1 1` / `add-todo m1 "…"` | track sub-todos |
+| `mox milestone block m2 --note "…"` | mark blocked (ETA becomes unavailable) |
 | `mox check` (`mox attention`) | human checks ordered by when they are due |
 | `mox check --watch` | live sidebar, refreshed every 10 s (Ctrl-C to quit) |
 | `mox check --oneline` | one line for tmux/waybar/polybar |
@@ -177,6 +187,52 @@ Channels (all off by default):
 * **Webhook**: `notify_webhook = true` + `webhook_url = "https://…"`; the URL is
   kept out of argv too (ntfy, a custom bot, a Slack proxy...).
 
+## Milestones, progress and ETA
+
+Every project is planned as **3–6 ordered milestones**. Each milestone has:
+
+* a title, description and 2–5 concrete sub-todos;
+* a complexity class (`low` = 1, `medium` = 2, `high` = 3, `very-high` = 5);
+* a planned duration in minutes;
+* an optional algorithmic note (`O(n log n) per batch`, `O(n) memory`) when the
+  work is non-trivial.
+
+The plan is written to `MILESTONES.json` in the project (committed). Agents move
+it forward with mox, which also records transition times:
+
+```bash
+cd ~/mox-projects/fetcher
+mox milestone list
+mox milestone start m2
+mox milestone todo m2 1
+mox milestone done m2 --note "parser tests pass, pushed"
+mox milestone block m3 --note "waiting for the API key"
+mox milestone status
+```
+
+`mox status` shows the current milestone, weighted progress and ETA:
+
+```text
+slug        status   compute  progress      eta                repo
+fetcher     running  light    m2/4 45%      15:42 (in 38m)     https://github.com/…
+```
+
+How the ETA is computed:
+
+1. progress is weighted by complexity, not by raw milestone count;
+2. completed milestones calibrate the plan: `actual / planned`, clamped to
+   0.25–4×, so a project that runs 2× slower gets a 2× longer estimate;
+3. the current milestone's elapsed time is subtracted from its estimate;
+4. a blocked milestone makes the ETA unavailable (`blocked`);
+5. a milestone without an estimate falls back to 30 minutes per weight unit.
+
+The board is the contract: `mox status --watch` polls it (side-by-side with the
+checks sidebar), `mox up` prints it after each wave, `mox status --json` exposes
+`milestone_progress`, and milestone transitions can be pushed to Telegram if
+notifications are enabled. Agents are told to mark a milestone done only after
+its tests pass and the work is committed and pushed; the post-run check then
+verifies the tree is clean.
+
 ## Safety rules (enforced, not just documented)
 
 * **Repositories are always private.** `gh repo create … --private` is the only
@@ -246,6 +302,7 @@ CPU:
 │   ├── AGENTS.md            # project rules for the agent
 │   ├── TASK.md              # spec, answers, definition of done
 │   ├── CHECKS.md            # human checks the agent requests
+│   ├── MILESTONES.json      # plan + live progress board
 │   ├── README.md
 │   └── .gitignore
 └── .mox/                    # never committed
@@ -301,7 +358,8 @@ webhook_url = ""
 ```
 
 `MOX_DRY_RUN=1` is equivalent to `--dry-run`; `--run-timeout` overrides the cap
-for one command.
+for one command. The ETA calibration is internal (0.25–4×); no configuration is
+needed.
 
 ## Architecture (why it is testable)
 
@@ -320,13 +378,14 @@ for one command.
 | `guard` | agent wrappers and the allow/deny rules for git/gh/ssh/signals |
 | `lock` | exclusive locks with stale-owner reclaim |
 | `verify` | post-run dirty-tree / unpushed-commit verification |
+| `milestones` | boards, transitions, weighted progress and ETA |
 | `notify` | Telegram, desktop and webhook channels (secrets out of argv) |
 | `app` / `cli` | commands and argument parsing |
 
 Testing:
 
 ```bash
-cargo test                 # 199 unit + 7 end-to-end tests
+cargo test                 # 222 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

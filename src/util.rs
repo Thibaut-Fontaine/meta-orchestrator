@@ -138,6 +138,33 @@ pub fn human_mb(mb: u64) -> String {
     human_bytes(mb.saturating_mul(1024 * 1024))
 }
 
+/// Compact human duration: `45s`, `12m`, `2h05m`, `3d4h`.
+pub fn format_secs(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        let rem = minutes % 60;
+        return if rem == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{rem:02}m")
+        };
+    }
+    let days = hours / 24;
+    let rem_hours = hours % 24;
+    if rem_hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d{rem_hours}h")
+    }
+}
+
 /// Extract the first balanced JSON object from arbitrary text.
 ///
 /// LLMs often wrap JSON in prose or fenced code blocks. This scans for the
@@ -378,6 +405,15 @@ Thanks."#;
     fn extract_json_returns_none_without_object() {
         assert!(extract_json_object("no json here").is_none());
         assert!(extract_json_object("{unbalanced").is_none());
+    }
+
+    #[test]
+    fn human_durations() {
+        assert_eq!(format_secs(42), "42s");
+        assert_eq!(format_secs(90), "1m");
+        assert_eq!(format_secs(3600), "1h");
+        assert_eq!(format_secs(7500), "2h05m");
+        assert_eq!(format_secs(90_000), "1d1h");
     }
 
     #[test]

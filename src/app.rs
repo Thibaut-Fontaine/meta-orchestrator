@@ -11,6 +11,7 @@ use crate::exec::{CommandRunner, CommandSpec};
 use crate::github;
 use crate::ideas;
 use crate::lock::LockGuard;
+use crate::milestones;
 use crate::model::{ComputeNeed, Plan, ProjectSpec, ProjectState, ProjectStatus};
 use crate::notify::{self, Event, EventKind, Notifier};
 use crate::prompts;
@@ -155,7 +156,17 @@ impl App {
                 no_run,
                 force,
             } => self.cmd_up(only, max_parallel, no_github, no_run, force, out),
-            Command::Status { json } => self.cmd_status(json, out),
+            Command::Status {
+                json,
+                watch,
+                interval,
+            } => {
+                if watch {
+                    self.cmd_status_live(interval, out)
+                } else {
+                    self.cmd_status(json, out)
+                }
+            }
             Command::Logs { slug, lines } => self.cmd_logs(&slug, lines, out),
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
@@ -191,6 +202,7 @@ impl App {
             Command::Ideas { file } => self.cmd_ideas(&file, out),
             // Handled in main before any config is loaded.
             Command::Guard { .. } => unreachable!("guard is dispatched by main"),
+            Command::Milestone { .. } => unreachable!("milestone is dispatched by main"),
         }
     }
 
@@ -999,6 +1011,28 @@ impl App {
                 out,
             );
         }
+        if !self.dry_run {
+            let now = Utc::now();
+            let mut lines = Vec::new();
+            for spec in &specs {
+                let dir = self.cfg.projects_root_path().join(&spec.slug);
+                if let Some(board) = milestones::load_optional(&milestones::board_path(&dir)) {
+                    let progress = milestones::progress(&board, now);
+                    lines.push(format!(
+                        "  {:<20} {:<10} ETA {}",
+                        progress.slug,
+                        progress.short(),
+                        progress.eta_label()
+                    ));
+                }
+            }
+            if !lines.is_empty() {
+                writeln!(out, "\nmilestones:")?;
+                for line in lines {
+                    writeln!(out, "{line}")?;
+                }
+            }
+        }
         if self.dry_run {
             writeln!(
                 out,
@@ -1050,7 +1084,20 @@ impl App {
     fn cmd_status(&mut self, json: bool, out: &mut dyn Write) -> Result<()> {
         let state = self.load_state()?;
         if json {
-            writeln!(out, "{}", serde_json::to_string_pretty(&state)?)?;
+            let mut value = serde_json::to_value(&state)?;
+            let mut progress_map = serde_json::Map::new();
+            let now = Utc::now();
+            for project in state.ordered() {
+                let dir = PathBuf::from(&project.path);
+                if let Some(board) = milestones::load_optional(&milestones::board_path(&dir)) {
+                    progress_map.insert(
+                        project.slug.clone(),
+                        serde_json::to_value(milestones::progress(&board, now))?,
+                    );
+                }
+            }
+            value["milestone_progress"] = serde_json::Value::Object(progress_map);
+            writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
             return Ok(());
         }
         if state.projects.is_empty() {
@@ -1070,8 +1117,8 @@ impl App {
         }
         writeln!(
             out,
-            "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7}  repo",
-            "slug", "status", "compute", "cores", "size", "time"
+            "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7} {:>12} {:>16}  repo",
+            "slug", "status", "compute", "cores", "size", "time", "progress", "eta"
         )?;
         for project in state.ordered() {
             let dir = PathBuf::from(&project.path);
@@ -1099,9 +1146,15 @@ impl App {
             let running = runner::read_pid(&self.cfg, &project.slug)
                 .map(|pid| format!(" (pid {pid})"))
                 .unwrap_or_default();
+            let milestone_progress = milestones::load_optional(&milestones::board_path(&dir))
+                .map(|board| milestones::progress(&board, Utc::now()));
+            let (progress_label, eta_label) = match &milestone_progress {
+                Some(progress) => (progress.short(), progress.eta_label()),
+                None => ("-".to_string(), "-".to_string()),
+            };
             writeln!(
                 out,
-                "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7}  {}{}",
+                "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7} {:>12} {:>16}  {}{}",
                 project.slug,
                 format!("{}{}", project.status.as_str(), running),
                 project.compute.as_str(),
@@ -1112,6 +1165,8 @@ impl App {
                 } else {
                     "-".to_string()
                 },
+                truncate_chars(&progress_label, 12),
+                truncate_chars(&eta_label, 16),
                 truncate_chars(&project.repo_url, 44),
                 if project.last_error.is_some() {
                     " !"
@@ -1123,6 +1178,20 @@ impl App {
             )?;
         }
         Ok(())
+    }
+
+    fn cmd_status_live(&mut self, interval: u64, out: &mut dyn Write) -> Result<()> {
+        let interval = interval.max(1);
+        loop {
+            write!(out, "\x1b[2J\x1b[H")?;
+            self.cmd_status(false, out)?;
+            writeln!(
+                out,
+                "\nrefreshing every {interval}s — Ctrl-C to quit · ETA is weighted by milestone complexity"
+            )?;
+            out.flush()?;
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        }
     }
 
     fn cmd_logs(&mut self, slug: &str, lines: usize, out: &mut dyn Write) -> Result<()> {
@@ -2098,6 +2167,51 @@ mod tests {
         app.cmd_status(true, &mut json_out).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
         assert_eq!(value["projects"]["demo"]["title"], "Demo");
+    }
+
+    #[test]
+    fn status_shows_milestone_progress_and_eta() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let project_dir = app.cfg.projects_root_path().join("demo");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut spec = spec("demo");
+        spec.milestones = crate::milestones::fallback_for(&spec);
+        let mut board = crate::milestones::board_from_spec(&spec, Utc::now());
+        crate::milestones::start(&mut board, "m1", Utc::now()).unwrap();
+        crate::milestones::done(
+            &mut board,
+            "m1",
+            "",
+            Utc::now() + chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        crate::milestones::start(&mut board, "m2", Utc::now()).unwrap();
+        crate::milestones::save(&crate::milestones::board_path(&project_dir), &board).unwrap();
+
+        let mut state = State::default();
+        state.upsert(ProjectState::new(
+            "demo",
+            "Demo",
+            &project_dir.display().to_string(),
+        ));
+        app.save_state(&state).unwrap();
+
+        let mut out = Vec::new();
+        app.cmd_status(false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("progress"), "{text}");
+        assert!(text.contains("m2/3"), "{text}");
+        assert!(text.contains("33%"), "{text}");
+
+        let mut json_out = Vec::new();
+        app.cmd_status(true, &mut json_out).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
+        assert_eq!(value["milestone_progress"]["demo"]["current"], "m2");
+        assert_eq!(value["milestone_progress"]["demo"]["percent"], 33);
+        assert_eq!(value["milestone_progress"]["demo"]["done"], 1);
     }
 
     #[test]

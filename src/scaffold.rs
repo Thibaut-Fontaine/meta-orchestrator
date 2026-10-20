@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::model::ProjectSpec;
 use crate::util::display_path;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::path::{Path, PathBuf};
 
 /// Result of preparing one workspace.
@@ -148,6 +149,22 @@ are stricter.
 Do not commit untested code. If a test cannot run in this environment, record
 why in `DECISIONS.md`.
 
+## Milestones (mandatory)
+
+`MILESTONES.json` is the plan and the live progress board. Work in order and
+update it only through mox:
+
+* before starting: `mox milestone start m1`
+* tick a sub-todo: `mox milestone todo m1 1` (1-based, see `mox milestone list`)
+* done only after tests pass and the work is committed and pushed:
+  `mox milestone done m1 --note "what was validated"`
+* blocked: `mox milestone block m1 --note "what is missing"`
+* skip only with a recorded reason: `mox milestone skip m1`
+
+Never edit `MILESTONES.json` by hand. Commit it with the milestone's work; mox
+uses it to report live progress and the ETA. If the plan no longer fits, record
+why in `DECISIONS.md` and add sub-todos rather than silently skipping ahead.
+
 ## Parallel safety
 
 Other agents, scripts and OpenCode sessions run at the same time on this
@@ -192,8 +209,8 @@ path; record the need in `CHECKS.md`.
 
 See the "Definition of done" section of `TASK.md`. Finish by updating
 `STATUS.md` with what works, what is untested, and the next three actions, then
-commit it together with any `CHECKS.md`/`DECISIONS.md` changes and push. `mox`
-treats uncommitted or unpushed work as a failed run.
+commit it together with any `CHECKS.md`/`DECISIONS.md`/`MILESTONES.json` changes
+and push. `mox` treats uncommitted or unpushed work as a failed run.
 "#;
 
 /// Create (or complete) one project workspace on disk.
@@ -224,6 +241,14 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
             write_new(&file, &content)?;
             created.push(file);
         }
+    }
+
+    // The live progress board. Agents update it with `mox milestone`.
+    let board_file = crate::milestones::board_path(&path);
+    if !board_file.exists() {
+        let board = crate::milestones::board_from_spec(spec, Utc::now());
+        crate::milestones::save(&board_file, &board)?;
+        created.push(board_file);
     }
 
     Ok(Scaffold {
@@ -309,6 +334,33 @@ fn task_markdown(cfg: &Config, spec: &ProjectSpec) -> String {
             out.push_str(&format!("- {risk}\n"));
         }
     }
+    let milestones = if spec.milestones.is_empty() {
+        crate::milestones::fallback_for(spec)
+    } else {
+        spec.milestones.clone()
+    };
+    out.push_str("\n## Milestones\n\n");
+    out.push_str("Track them with `mox milestone` (do not edit `MILESTONES.json` by hand).\n\n");
+    out.push_str("| id | milestone | complexity | estimate | algorithm |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for milestone in &milestones {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            milestone.id,
+            milestone.title,
+            milestone.complexity.as_str(),
+            crate::util::format_secs(milestone.estimate_secs),
+            if milestone.algorithmic_complexity.is_empty() {
+                "-"
+            } else {
+                &milestone.algorithmic_complexity
+            }
+        ));
+        for todo in &milestone.todos {
+            out.push_str(&format!("|  | - [ ] {} |  |  |  |\n", todo));
+        }
+    }
+
     out.push_str("\n## Definition of done\n\n");
     if spec.acceptance_criteria.is_empty() {
         out.push_str("- The project builds and its tests pass.\n");
@@ -365,16 +417,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scaffolding = scaffold_project(&cfg(dir.path()), &spec()).unwrap();
         assert!(!scaffolding.existed);
-        assert_eq!(scaffolding.created.len(), 5);
+        assert_eq!(scaffolding.created.len(), 6);
         let project = dir.path().join("demo");
         assert!(project.join("README.md").exists());
         assert!(project.join("AGENTS.md").exists());
         assert!(project.join(".gitignore").exists());
         assert!(project.join("TASK.md").exists());
         assert!(project.join("CHECKS.md").exists());
+        assert!(project.join("MILESTONES.json").exists());
+        let board = crate::milestones::load(&project.join("MILESTONES.json")).unwrap();
+        assert_eq!(board.slug, "demo");
+        assert_eq!(board.milestones.len(), 3);
+        assert!(board
+            .milestones
+            .iter()
+            .all(|m| m.status == crate::milestones::MilestoneStatus::Pending));
         let task = std::fs::read_to_string(project.join("TASK.md")).unwrap();
         assert!(task.contains("PostgreSQL"));
         assert!(task.contains("Private repository"));
+        assert!(task.contains("## Milestones"));
+        assert!(task.contains("m1"));
+        assert!(task.contains("mox milestone"));
     }
 
     #[test]
@@ -426,5 +489,7 @@ mod tests {
         assert!(AGENTS_MD.contains("mox vps allow"));
         assert!(AGENTS_MD.contains("Guardrails"));
         assert!(AGENTS_MD.contains("If you spawn sub-agents"));
+        assert!(AGENTS_MD.contains("## Milestones (mandatory)"));
+        assert!(AGENTS_MD.contains("mox milestone done m1"));
     }
 }

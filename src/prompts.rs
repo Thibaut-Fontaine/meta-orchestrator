@@ -5,7 +5,7 @@
 //! safe defaults so one malformed field never blocks the whole plan.
 
 use crate::config::Config;
-use crate::model::{ComputeNeed, Idea, ProjectSpec, Question};
+use crate::model::{Complexity, ComputeNeed, Idea, MilestoneSpec, ProjectSpec, Question};
 use crate::util::{slug_from_idea, slugify, truncate_chars, unique_slug};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -56,14 +56,31 @@ pub fn questions_prompt(cfg: &Config, ideas: &[Idea]) -> String {
                \"compute\": \"light|medium|heavy|gpu\",\n\
                \"needs_vps\": false,\n\
                \"estimated_disk_mb\": 500,\n\
-               \"acceptance_criteria\": [\"...\"]\n\
+               \"acceptance_criteria\": [\"...\"],\n\
+               \"milestones\": [\n\
+                 {\"id\": \"m1\", \"title\": \"Foundation and failing tests\",\n\
+                  \"description\": \"what this milestone delivers\",\n\
+                  \"todos\": [\"write the first failing test\", \"set up the skeleton\"],\n\
+                  \"complexity\": \"low|medium|high|very-high\",\n\
+                  \"algorithmic_complexity\": \"O(n log n) if relevant, else empty\",\n\
+                  \"estimate_minutes\": 45}\n\
+               ]\n\
              }\n\
            ]\n\
          }\n\n\
          `compute` means the agent's build/run intensity. Use `heavy` for \
          compilers, data processing or long test suites, and `gpu` only when the \
          project truly needs a GPU. `needs_vps` is true only when the project must \
-         run services on the VPS.\n\n",
+         run services on the VPS.\n\n\
+         Milestones: produce 3 to 6 ordered, independently deliverable \
+         milestones that an autonomous agent can finish one at a time. Each one \
+         needs 2-5 concrete sub-todos, a complexity class, and a realistic \
+         estimate in minutes (20-120). The FIRST milestone must include writing \
+         failing tests. Set `algorithmic_complexity` only when the milestone \
+         involves a non-trivial algorithm or data structure (for example \
+         `O(n log n) per batch` or `O(1) lookups, O(n) memory`); otherwise use an \
+         empty string. Estimates drive the ETA shown by `mox status`, so be \
+         honest about size.\n\n",
     );
     out.push_str("## Ideas\n");
     for (index, idea) in ideas.iter().enumerate() {
@@ -124,6 +141,16 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
          ## Assumptions\n{assumptions}\n\n\
          ## Suggested stack\n{stack}\n\n\
          ## Definition of done\n{acceptance}\n\n\
+         ## Milestone plan (work in this order)\n{milestones}\n\n\
+         Track progress with the mox command (it updates `MILESTONES.json` for you):\n\
+           mox milestone start m1\n\
+           mox milestone todo m1 1\n\
+           mox milestone done m1 --note \"what was validated\"\n\
+           mox milestone block m1 --note \"what is missing\"\n\
+         Start a milestone before working on it, tick its sub-todos, and mark it \
+         done only after its tests pass and the work is committed and pushed. \
+         Never edit `MILESTONES.json` by hand and keep it committed; `mox status` \
+         uses it to compute live progress and the ETA.\n\n\
          ## Hard rules\n\
          1. Read {agents} first and follow it. Never touch other repositories or \
             the VPS services mentioned there (nginx, instabot, llmcheck).\n\
@@ -167,10 +194,10 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
          12. You have a wall-clock cap of {cap} seconds. Prefer a small, working, \
              tested slice over a large unfinished one; commit early and often.\n\
          13. Finish by writing `STATUS.md` with: what works, what is untested, and \
-             the three most valuable next steps. Commit it (and any `CHECKS.md` or \
-             `DECISIONS.md` changes) as your final commit, then push. `mox` only \
-             counts a run as done when the tree is clean and `origin/main` is up \
-             to date.\n\n\
+             the three most valuable next steps. Commit it (and any `CHECKS.md`, \
+             `DECISIONS.md` or `MILESTONES.json` changes) as your final commit, \
+             then push. `mox` only counts a run as done when the tree is clean and \
+             `origin/main` is up to date.\n\n\
          ## Working notes\n\
          Environment: project directory is {path}. Use `git status` to see what is \
          already committed. The task specification is also in `TASK.md`.\n\
@@ -192,6 +219,7 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
         agents = crate::util::display_path(&cfg.agents_global_path()),
         path = cfg.projects_root_path().join(&spec.slug).display(),
         cap = cfg.run_timeout_secs,
+        milestones = render_milestone_plan(spec),
         extra = if cfg.extra_instructions.trim().is_empty() {
             String::new()
         } else {
@@ -227,6 +255,19 @@ pub fn reflection_prompt(spec: &ProjectSpec, status_md: &str, log_tail: &str) ->
     )
 }
 
+/// One milestone as returned by the brain.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BrainMilestone {
+    pub id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub todos: Vec<String>,
+    pub complexity: Option<String>,
+    pub algorithmic_complexity: Option<String>,
+    pub estimate_minutes: Option<u64>,
+}
+
 /// One project as returned by the brain.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -242,6 +283,7 @@ pub struct BrainProject {
     pub needs_vps: Option<bool>,
     pub estimated_disk_mb: Option<u64>,
     pub acceptance_criteria: Vec<String>,
+    pub milestones: Vec<BrainMilestone>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -302,6 +344,7 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
         };
 
         let mut spec = ProjectSpec::from_idea(idea, hint.clone());
+        let mut brain_milestones = Vec::new();
         if let Some(brain) = brain {
             if let Some(slug) = brain.slug.as_deref() {
                 let clean = slugify(slug);
@@ -330,6 +373,7 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
                 ComputeNeed::Heavy | ComputeNeed::Gpu
             ));
             spec.estimated_disk_mb = brain.estimated_disk_mb.unwrap_or(512).clamp(64, 200_000);
+            brain_milestones = brain.milestones;
         }
         if spec.summary.is_empty() {
             spec.summary = truncate_chars(&idea.details, 280);
@@ -337,11 +381,80 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
         if spec.acceptance_criteria.is_empty() {
             spec.acceptance_criteria = default_acceptance();
         }
+        spec.milestones = normalise_milestones(brain_milestones, &spec);
         spec.slug = unique_slug(&spec.slug, &used_slugs);
         used_slugs.push(spec.slug.clone());
         specs.push(spec);
     }
     specs
+}
+
+/// Normalise brain milestones: stable ids, bounded estimates, clean todos.
+/// Falls back to a 3-milestone plan when the brain returned none.
+pub fn normalise_milestones(raw: Vec<BrainMilestone>, spec: &ProjectSpec) -> Vec<MilestoneSpec> {
+    let mut out: Vec<MilestoneSpec> = Vec::new();
+    for milestone in raw {
+        let title = milestone.title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let complexity = milestone
+            .complexity
+            .as_deref()
+            .and_then(|c| c.parse::<Complexity>().ok())
+            .unwrap_or(Complexity::Medium);
+        let minutes = milestone.estimate_minutes.unwrap_or(0);
+        let estimate_secs = if minutes == 0 {
+            (complexity.weight() as u64) * 900
+        } else {
+            minutes.clamp(5, 480) * 60
+        };
+        out.push(MilestoneSpec {
+            id: format!("m{}", out.len() + 1),
+            title: title.to_string(),
+            description: milestone.description.trim().to_string(),
+            todos: clean_list(milestone.todos),
+            complexity,
+            algorithmic_complexity: milestone
+                .algorithmic_complexity
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            estimate_secs,
+        });
+    }
+    if out.is_empty() {
+        crate::milestones::fallback_for(spec)
+    } else {
+        out
+    }
+}
+
+/// Markdown bullet list of the milestone plan used by the execution prompt.
+fn render_milestone_plan(spec: &ProjectSpec) -> String {
+    if spec.milestones.is_empty() {
+        return "(no milestones were planned; work in small, tested steps)".to_string();
+    }
+    let mut out = String::new();
+    for milestone in &spec.milestones {
+        out.push_str(&format!(
+            "- {} [{}] ~{}: {}\n",
+            milestone.id,
+            milestone.complexity.as_str(),
+            crate::util::format_secs(milestone.estimate_secs),
+            milestone.title
+        ));
+        if !milestone.algorithmic_complexity.is_empty() {
+            out.push_str(&format!(
+                "  algorithm: {}\n",
+                milestone.algorithmic_complexity
+            ));
+        }
+        for todo in &milestone.todos {
+            out.push_str(&format!("  - [ ] {todo}\n"));
+        }
+    }
+    out
 }
 
 fn normalise_questions(questions: Vec<Question>) -> Vec<Question> {
@@ -487,6 +600,9 @@ mod tests {
         assert!(prompt.contains("\"questions\""));
         assert!(prompt.contains("\"compute\""));
         assert!(prompt.contains("PRIVATE"));
+        assert!(prompt.contains("\"milestones\""));
+        assert!(prompt.contains("\"estimate_minutes\""));
+        assert!(prompt.contains("\"algorithmic_complexity\""));
     }
 
     #[test]
@@ -519,6 +635,8 @@ mod tests {
         assert!(prompt.contains("sub-agents"));
         assert!(prompt.contains("7200 seconds"));
         assert!(prompt.contains("Commit it"));
+        assert!(prompt.contains("mox milestone start"));
+        assert!(prompt.contains("Milestone plan"));
         assert!(prompt.contains("/tmp/projects/tool"));
         assert!(prompt.contains("AGENTS-GLOBAL.md"));
     }
@@ -557,6 +675,42 @@ mod tests {
         assert_eq!(specs[0].slug, "alpha-thing");
         assert_eq!(specs[1].title, "Beta!");
         assert_eq!(specs[2].slug, "gamma"); // fallback
+    }
+
+    #[test]
+    fn merge_normalises_milestones_and_falls_back() {
+        let ideas = vec![idea("X", "x")];
+        let assessed = parse_brain_response(
+            r#"{"projects": [{
+                "slug": "x",
+                "milestones": [
+                    {"title": "Foundation", "todos": ["write test"], "complexity": "low", "estimate_minutes": 30, "algorithmic_complexity": "O(1)"},
+                    {"title": "Core", "complexity": "very-high", "estimate_minutes": 999},
+                    {"title": "  "}
+                ]
+            }]}"#,
+        )
+        .unwrap();
+        let specs = merge_specs(&ideas, assessed);
+        let milestones = &specs[0].milestones;
+        assert_eq!(milestones.len(), 2);
+        assert_eq!(milestones[0].id, "m1");
+        assert_eq!(milestones[1].id, "m2");
+        assert_eq!(milestones[0].estimate_secs, 1800);
+        assert_eq!(milestones[1].estimate_secs, 480 * 60);
+        assert_eq!(milestones[1].complexity, Complexity::VeryHigh);
+        assert_eq!(milestones[0].algorithmic_complexity, "O(1)");
+
+        let specs = merge_specs(&ideas_v2(), Vec::new());
+        assert_eq!(specs[0].milestones.len(), 3);
+        assert!(specs[0].milestones[0]
+            .todos
+            .iter()
+            .any(|t| t.contains("failing")));
+    }
+
+    fn ideas_v2() -> Vec<Idea> {
+        vec![idea("Y", "y")]
     }
 
     #[test]

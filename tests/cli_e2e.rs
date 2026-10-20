@@ -113,6 +113,36 @@ impl Harness {
         output
     }
 
+    fn run_in(&self, dir: &Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_mox"))
+            .args(args)
+            .current_dir(dir)
+            .env("MOX_CONFIG", &self.config)
+            .env("MOX_PROJECTS_ROOT", &self.projects)
+            .env("MOX_STATE_DIR", &self.state)
+            .env("MOX_OPENCODE_BIN", &self.fake_opencode)
+            .env("MOX_GH_BIN", &self.fake_gh)
+            .env("MOX_GIT_BIN", "git")
+            .env("MOX_MAX_PARALLEL", "1")
+            .env("GIT_AUTHOR_NAME", "mox test")
+            .env("GIT_AUTHOR_EMAIL", "mox@example.invalid")
+            .env("GIT_COMMITTER_NAME", "mox test")
+            .env("GIT_COMMITTER_EMAIL", "mox@example.invalid")
+            .output()
+            .expect("running mox")
+    }
+
+    fn run_ok_in(&self, dir: &Path, args: &[&str]) -> String {
+        let output = self.run_in(dir, args);
+        assert!(
+            output.status.success(),
+            "mox {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
     fn run_ok(&self, args: &[&str]) -> String {
         let output = self.run(args);
         assert!(
@@ -453,4 +483,83 @@ echo '{"ok":true}'
         !status.contains("secret-token-123"),
         "token leaked in status"
     );
+}
+
+#[test]
+fn milestones_drive_progress_and_eta() {
+    use meta_orchestrator::milestones;
+
+    let h = harness("PRIVATE");
+    let ideas = h.root.join("ideas.txt");
+    h.run_ok(&["init"]);
+    h.run_ok(&["plan", "--ideas", ideas.to_str().unwrap(), "--yes"]);
+    h.run_ok(&["up", "--no-run"]);
+    let project = h.projects.join("demo");
+
+    let board_path = milestones::board_path(&project);
+    assert!(board_path.exists(), "scaffold must create MILESTONES.json");
+    let board = milestones::load(&board_path).unwrap();
+    assert_eq!(board.milestones.len(), 3, "fallback plan expected");
+    assert!(board
+        .milestones
+        .iter()
+        .all(|m| m.status == milestones::MilestoneStatus::Pending));
+
+    let listed = h.run_ok_in(&project, &["milestone", "list"]);
+    assert!(listed.contains("m1"), "{listed}");
+    assert!(listed.contains("pending"), "{listed}");
+    assert!(
+        listed.contains("algorithm") || listed.contains("estimate"),
+        "{listed}"
+    );
+
+    let started = h.run_ok_in(&project, &["milestone", "start", "m1"]);
+    assert!(started.contains("started m1"), "{started}");
+    assert!(started.contains("current: m1"), "{started}");
+
+    h.run_ok_in(&project, &["milestone", "todo", "m1", "1"]);
+    let done = h.run_ok_in(
+        &project,
+        &["milestone", "done", "m1", "--note", "tests are green"],
+    );
+    assert!(done.contains("completed m1"), "{done}");
+    assert!(done.contains("1/3 milestones"), "{done}");
+
+    let board = milestones::load(&board_path).unwrap();
+    assert_eq!(
+        board.milestones[0].status,
+        milestones::MilestoneStatus::Done
+    );
+    assert!(board.milestones[0].todos[0].done);
+    assert!(board.milestones[0].actual_secs < 10);
+    assert!(board.events.iter().any(|e| e.kind == "done"));
+
+    let status = h.run_ok_in(&project, &["milestone", "status"]);
+    assert!(status.contains("1/3 milestones"), "{status}");
+    assert!(status.contains("current: m2"), "{status}");
+    assert!(status.contains("eta:"), "{status}");
+
+    let table = h.run_ok(&["status"]);
+    assert!(table.contains("m2/3"), "{table}");
+    assert!(table.contains("progress"), "{table}");
+
+    let json = h.run_ok(&["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["milestone_progress"]["demo"]["done"], 1);
+    assert_eq!(value["milestone_progress"]["demo"]["current"], "m2");
+
+    // A blocked milestone removes the ETA and is visible in the status.
+    let blocked = h.run_ok_in(
+        &project,
+        &[
+            "milestone",
+            "block",
+            "m2",
+            "--note",
+            "waiting for the owner",
+        ],
+    );
+    assert!(blocked.contains("blocked"), "{blocked}");
+    let status = h.run_ok_in(&project, &["milestone", "status"]);
+    assert!(status.contains("ETA is unavailable"), "{status}");
 }
