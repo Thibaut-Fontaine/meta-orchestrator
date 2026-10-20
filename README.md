@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 311 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 318 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -110,6 +110,7 @@ Useful flags:
 | `mox bot` / `mox bot --once` | read-only Telegram bot (long-poll / one batch) |
 | `mox completions bash\|zsh\|fish` | print a shell completion script |
 | `mox events [--tail N]` | local event log |
+| `mox recovery [--push] [--check] [--slug slug]` | show/push/verify disaster-recovery snapshots |
 | `mox init --profile paranoid` | stricter defaults (1 agent, no auto-approve) |
 | `mox vps ps` | audit remote mox/agent processes, flag GHOST/BOT |
 | `mox vps cleanup --apply --yes` | kill only untracked mox-remote/bot pids |
@@ -366,6 +367,30 @@ Run it under a systemd **user** service if you want it always available; it can
 only see state where it runs. For a bot that stays up while this workstation is
 off, run it on the VPS once mox state lives there (future work).
 
+## Disaster recovery (if this computer is destroyed)
+
+mox keeps a human-readable recovery copy **on the VPS**, not only here:
+
+* every `mox milestone` transition writes `RECOVERY.md` in the project
+  (gitignored); remote agents do this on the VPS itself;
+* `mox up` pushes `~/mox-remote/<slug>/RECOVERY.md` and a global
+  `~/mox-remote/RECOVERY.md` before, during (every `recovery_interval_secs`,
+  default 120 s) and after runs;
+* `mox recovery --push` does it manually, `mox recovery --check` reports remote
+  file ages/missing files, and `mox recovery --slug demo` prints one project.
+
+Each file contains: title, status/target/attempts, private repo URL, VPS path,
+detached pid, milestone table with ETA, open todos, pending human checks,
+`STATUS.md` excerpt, and exact steps to resume on a new machine. It contains
+**no tokens, answers, environment variables or logs**. Files are 0600.
+
+If the workstation is gone: `ssh vps-ovh`, read `~/mox-remote/RECOVERY.md` and
+`~/mox-remote/<slug>/RECOVERY.md`, clone the private repo, then run
+`mox project adopt` + `mox up --resume`.
+
+`recovery_enabled = true` and `recovery_interval_secs = 120` are configurable;
+a VPS outage only prints a warning and never fails a run.
+
 ## Operations
 
 - `mox init --profile minimal|standard|paranoid` writes a stricter preset
@@ -466,6 +491,7 @@ CPU:
 │   ├── AGENTS.md            # project rules for the agent
 │   ├── TASK.md              # spec, answers, definition of done
 │   ├── TASKS.md             # milestone/sub-todo checklist
+│   ├── RECOVERY.md          # local snapshot (gitignored)
 │   ├── CHECKS.md            # human checks the agent requests
 │   ├── MILESTONES.json      # plan + live progress board
 │   ├── README.md
@@ -512,6 +538,8 @@ nice_level = 10
 min_free_disk_mb = 2048
 mem_per_agent_mb = 768
 reflect_after_run = false  # write .mox/reflections/<slug>.md after success
+recovery_enabled = true    # push RECOVERY.md snapshots to the VPS
+recovery_interval_secs = 120
 retry_backoff_secs = 5
 project_disk_budget_mb = 4096
 brain_timeout_secs = 900
@@ -565,7 +593,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 311 unit + 4 property + 8 end-to-end tests
+cargo test                 # 318 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

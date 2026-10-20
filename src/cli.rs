@@ -247,6 +247,19 @@ pub enum Command {
         shell: String,
     },
 
+    /// Disaster-recovery snapshots (local + VPS RECOVERY.md).
+    Recovery {
+        /// Push the snapshots to the VPS.
+        #[arg(long)]
+        push: bool,
+        /// Check the age of the recovery files on the VPS.
+        #[arg(long)]
+        check: bool,
+        /// Only this project slug.
+        #[arg(long)]
+        slug: Option<String>,
+    },
+
     /// Show the local event log.
     Events {
         /// Number of trailing lines.
@@ -773,6 +786,19 @@ mod tests {
             Command::Project {
                 action: ProjectAction::Remove { .. }
             }
+        ));
+    }
+
+    #[test]
+    fn parses_recovery() {
+        let cli = Cli::try_parse_from(["mox", "recovery", "--push", "--slug", "demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Recovery {
+                push: true,
+                slug: Some(ref s),
+                ..
+            } if s == "demo"
         ));
     }
 

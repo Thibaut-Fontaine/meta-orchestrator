@@ -46,6 +46,13 @@ them. OpenCode permissions are the stronger layer for tool calls.
 - Runtime logs, state, checks, prompts and caches are 0700/0600.
 - Bot chat IDs are allowlisted; the bot is read-only.
 
+## Recovery snapshots
+
+`RECOVERY.md` files are 0600, contain no tokens/answers/logs, and are pushed to
+the VPS so a destroyed workstation does not erase the operational picture. They
+are gitignored and never part of a commit. `mox recovery --check` reports stale
+or missing remote copies.
+
 ## Known limits
 
 - A determined agent with access to absolute binaries can bypass PATH wrappers.

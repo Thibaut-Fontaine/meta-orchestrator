@@ -215,6 +215,47 @@ pub fn remote_dir(cfg: &Config, slug: &str) -> String {
     }
 }
 
+/// Remote root (without the per-project slug).
+pub fn remote_root(cfg: &Config) -> String {
+    let root = cfg.remote_root.trim_end_matches('/');
+    if root.is_empty() {
+        "~/mox-remote".to_string()
+    } else {
+        root.to_string()
+    }
+}
+
+/// rsync one file to an explicit remote path (creates nothing).
+pub fn rsync_file_to_spec(
+    cfg: &Config,
+    alias: &str,
+    remote_path: &str,
+    local: &Path,
+) -> CommandSpec {
+    CommandSpec::new(&cfg.rsync_bin)
+        .args(["-az", "--timeout=120"])
+        .arg(local.display().to_string())
+        .arg(format!("{alias}:{remote_path}"))
+        .timeout(300)
+}
+
+/// Read-only remote file age check, for recovery staleness.
+pub fn remote_stat_spec(cfg: &Config, alias: &str, paths: &[String]) -> CommandSpec {
+    let list = paths
+        .iter()
+        .map(|p| format!("\"{}\"", p.replacen("~/", "$HOME/", 1)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "date +%s; for f in {list}; do if [ -f \"$f\" ]; then printf 'FILE=%s AGE=%s\\n' \"$f\" \"$(( $(date +%s) - $(stat -c %Y \"$f\") ))\"; else printf 'FILE=%s MISSING\\n' \"$f\"; fi; done"
+        ),
+        30,
+    )
+}
+
 pub fn rsync_to_spec(cfg: &Config, local: &Path, alias: &str, slug: &str) -> CommandSpec {
     let dest = format!("{alias}:{}/", remote_dir(cfg, slug));
     CommandSpec::new(&cfg.rsync_bin)

@@ -208,7 +208,10 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
              Never put secrets in it. `mox check` shows these to the owner.\n\
          12. You have a wall-clock cap of {cap} seconds. Prefer a small, working, \
              tested slice over a large unfinished one; commit early and often.\n\
-         13. Finish by writing `STATUS.md` with: what works, what is untested, and \
+         13. `mox milestone` writes `RECOVERY.md` (milestones, todos, resume steps). \
+             Keep `STATUS.md` current, never put secrets in either file, and do not \
+             delete them.\n\
+         14. Finish by writing `STATUS.md` with: what works, what is untested, and \
              the three most valuable next steps. Commit it (and any `CHECKS.md`, \
              `DECISIONS.md` or `MILESTONES.json` changes) as your final commit, \
              then push. `mox` only counts a run as done when the tree is clean and \

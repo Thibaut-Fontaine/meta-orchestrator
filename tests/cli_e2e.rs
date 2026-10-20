@@ -104,6 +104,7 @@ impl Harness {
             .env("MOX_GH_BIN", &self.fake_gh)
             .env("MOX_GIT_BIN", "git")
             .env("MOX_MAX_PARALLEL", "1")
+            .env("MOX_RECOVERY_ENABLED", "0")
             .env("GIT_AUTHOR_NAME", "mox test")
             .env("GIT_AUTHOR_EMAIL", "mox@example.invalid")
             .env("GIT_COMMITTER_NAME", "mox test")
@@ -124,6 +125,7 @@ impl Harness {
             .env("MOX_GH_BIN", &self.fake_gh)
             .env("MOX_GIT_BIN", "git")
             .env("MOX_MAX_PARALLEL", "1")
+            .env("MOX_RECOVERY_ENABLED", "0")
             .env("GIT_AUTHOR_NAME", "mox test")
             .env("GIT_AUTHOR_EMAIL", "mox@example.invalid")
             .env("GIT_COMMITTER_NAME", "mox test")
@@ -516,6 +518,9 @@ fn milestones_drive_progress_and_eta() {
     let started = h.run_ok_in(&project, &["milestone", "start", "m1"]);
     assert!(started.contains("started m1"), "{started}");
     assert!(started.contains("current: m1"), "{started}");
+    let recovery = std::fs::read_to_string(project.join("RECOVERY.md")).unwrap();
+    assert!(recovery.contains("Recovery — demo"), "{recovery}");
+    assert!(recovery.contains("Open todos"), "{recovery}");
 
     // Pretend the milestone took five minutes so it produces a usable stat.
     let mut board = milestones::load(&board_path).unwrap();

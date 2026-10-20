@@ -29,6 +29,7 @@ pub mod milestones;
 pub mod model;
 pub mod notify;
 pub mod prompts;
+pub mod recovery;
 pub mod remote;
 pub mod resources;
 pub mod runner;

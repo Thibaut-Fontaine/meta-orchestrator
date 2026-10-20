@@ -44,6 +44,7 @@ htmlcov/
 
 # Local state
 .mox/
+RECOVERY.md
 .env
 .env.*
 *.local
@@ -140,6 +141,9 @@ are stricter.
    secrets or personal data in that file.
 7. **Wall-clock cap.** Each run has a time limit. Prefer a small, working,
    tested slice over a large unfinished one; commit early and often.
+8. **Recovery.** `mox milestone` writes `RECOVERY.md` with milestones, todos and
+   resume steps. Keep `STATUS.md` current, never put secrets in either file, and
+   do not delete them.
 
 ## TDD workflow (mandatory, in this order)
 

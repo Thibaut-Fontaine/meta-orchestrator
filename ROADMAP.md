@@ -21,6 +21,7 @@ Status: **v0.8.0** · 311 unit + 4 property + 8 end-to-end tests · private repo
 | VPS execution | Explicit `--target vps`, one-time approval, rsync mirror, ssh run, git-bundle fetch-back, OVH checklist | ✅ code (VPS needs opencode + auth) |
 | Always-on remote | `--detach` starts a setsid run that survives the workstation; `mox vps sync` fetches progress/results | ✅ code |
 | Telegram bot | Read-only long-poll bot: projects, milestones, todos, checks, questions, ETA, logs, report | ✅ |
+| Disaster recovery | `RECOVERY.md` per project + global on the VPS, auto-synced before/during/after runs; local/remote agents update it | ✅ |
 | Remote ghost wall | Bot refuses remote context; `vps ps` audit + `vps cleanup`; detached pids recorded | ✅ |
 | Easy build | `./build.sh` (release, `--test`, `--debug`, `--install`, `--offline`) | ✅ |
 
@@ -265,6 +266,8 @@ Goal: predictable, observable, installable.
       Coverage measurement tooling is not installed. *(P2, S)*
 - [x] README/AGENTS/ROADMAP, `docs/architecture.md`, `docs/security.md`,
       `CHANGELOG.md`, release workflow, systemd units.
+- [x] Disaster recovery snapshots (`RECOVERY.md`) on the VPS, with resume steps,
+      auto-synced during runs and updated by `mox milestone`.
 
 Exit criteria: one command installs and configures; CI is green; a week of runs
 can be reviewed from `mox report`.

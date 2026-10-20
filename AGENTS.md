@@ -51,6 +51,8 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
 14. `mox bot` is read-only. It must enforce the configured chat-id allowlist,
     never expose tokens in argv, and never mutate projects, start agents or
     answer questions.
+15. Recovery snapshots (`RECOVERY.md`) must stay secret-free, 0600 and
+    gitignored; recovery failures are warnings and must never fail a run.
 
 ## Engineering rules
 

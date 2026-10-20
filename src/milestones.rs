@@ -768,6 +768,9 @@ pub fn run(action: Option<MilestoneAction>, file: Option<PathBuf>) -> Result<()>
         }
     }
 
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let _ = crate::recovery::write_board_recovery(&board, project_dir, Utc::now());
+
     if let Some(verb) = transition {
         println!("{verb}");
         print!("{}", render_progress(&board, Utc::now()));

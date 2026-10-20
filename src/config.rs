@@ -58,6 +58,10 @@ pub struct Config {
     pub max_attempts: u32,
     /// Write an automatic reflection after a successful run (uses the brain).
     pub reflect_after_run: bool,
+    /// Push recovery snapshots to the VPS during runs (disaster recovery).
+    pub recovery_enabled: bool,
+    /// Seconds between automatic recovery snapshots; 0 disables the timer.
+    pub recovery_interval_secs: u64,
     /// Soft budget per project, used by `status` and `clean`.
     pub project_disk_budget_mb: u64,
     /// Timeout for one brainstorming call.
@@ -114,6 +118,8 @@ impl Default for Config {
             disk_watchdog_secs: 30,
             max_attempts: 3,
             reflect_after_run: false,
+            recovery_enabled: true,
+            recovery_interval_secs: 120,
             project_disk_budget_mb: 4096,
             brain_timeout_secs: 900,
             run_timeout_secs: 7200,
@@ -209,6 +215,14 @@ impl Config {
         if let Some(v) = var("MOX_RESERVE_CORES") {
             if let Ok(n) = v.parse() {
                 self.reserve_cores = n;
+            }
+        }
+        if let Some(v) = var("MOX_RECOVERY_ENABLED") {
+            self.recovery_enabled = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = var("MOX_RECOVERY_INTERVAL_SECS") {
+            if let Ok(n) = v.parse() {
+                self.recovery_interval_secs = n;
             }
         }
         if let Some(v) = var("MOX_REFLECT_AFTER_RUN") {
@@ -375,6 +389,8 @@ retry_backoff_secs = {retry_backoff_secs}
 disk_watchdog_secs = {disk_watchdog_secs}
 max_attempts = {max_attempts}
 reflect_after_run = {reflect_after_run}
+recovery_enabled = {recovery_enabled}
+recovery_interval_secs = {recovery_interval_secs}
 project_disk_budget_mb = {project_disk_budget_mb}
 
 # Timeouts.
@@ -420,6 +436,8 @@ webhook_url = {webhook_url:?}
             disk_watchdog_secs = self.disk_watchdog_secs,
             max_attempts = self.max_attempts,
             reflect_after_run = self.reflect_after_run,
+            recovery_enabled = self.recovery_enabled,
+            recovery_interval_secs = self.recovery_interval_secs,
             project_disk_budget_mb = self.project_disk_budget_mb,
             brain_timeout_secs = self.brain_timeout_secs,
             run_timeout_secs = self.run_timeout_secs,

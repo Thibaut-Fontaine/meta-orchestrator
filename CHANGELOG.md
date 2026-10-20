@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Disaster recovery: per-project and global `RECOVERY.md` on the VPS, written by
+  `mox milestone`, pushed before/during/after runs, with milestones, todos,
+  checks, repo URL and resume steps. No secrets.
+- `mox recovery [--push|--check]`; configurable sync interval.
+
 ## 0.8.0
 
 - Checks recurrence, read-only VPS probes, `--context` path/commit.

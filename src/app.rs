@@ -265,6 +265,9 @@ impl App {
                 logs_older_than_days,
             } => self.cmd_clean(apply, all, force, logs_older_than_days, out),
             Command::Events { tail } => self.cmd_events(tail, out),
+            Command::Recovery { push, check, slug } => {
+                self.cmd_recovery(push, check, slug.as_deref(), out)
+            }
             Command::Completions { shell } => self.cmd_completions(&shell, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
             Command::Bot { once, allow_remote } => {
@@ -1153,6 +1156,12 @@ impl App {
                 .unwrap_or(false)
         });
 
+        if self.cfg.recovery_enabled && !self.dry_run {
+            if let Err(err) = crate::recovery::sync_all(self.runner.as_ref(), &self.cfg) {
+                writeln!(out, "warning: recovery snapshot failed: {err:#}")?;
+            }
+        }
+
         if opts.no_run {
             writeln!(out, "\nno agents launched (--no-run)")?;
             self.print_summary(&state, out)?;
@@ -1484,6 +1493,32 @@ impl App {
             } else {
                 None
             };
+            let recovery_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recovery_msg = Arc::new(std::sync::Mutex::new(None::<String>));
+            let recovery_thread = if self.cfg.recovery_enabled
+                && self.cfg.recovery_interval_secs > 0
+            {
+                let cfg = self.cfg.clone();
+                let runner = self.runner.clone();
+                let stop = recovery_stop.clone();
+                let msg = recovery_msg.clone();
+                Some(std::thread::spawn(move || loop {
+                    for _ in 0..cfg.recovery_interval_secs {
+                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    if let Err(err) = crate::recovery::sync_all(runner.as_ref(), &cfg) {
+                        *msg.lock().unwrap() = Some(format!("recovery snapshot failed: {err:#}"));
+                    }
+                }))
+            } else {
+                None
+            };
             let outcomes =
                 runner::execute_pool(self.runner.as_ref(), &self.cfg, runs, effective, &slots);
             for outcome in outcomes {
@@ -1557,6 +1592,13 @@ impl App {
                 state.upsert(project);
                 let _ = events::record(&self.cfg, "run", &slug, &status);
             }
+            recovery_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = recovery_thread {
+                let _ = thread.join();
+                if let Some(message) = recovery_msg.lock().unwrap().take() {
+                    writeln!(out, "\nwarning: {message}")?;
+                }
+            }
             watchdog_stop.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(watchdog) = watchdog {
                 let _ = watchdog.join();
@@ -1565,6 +1607,10 @@ impl App {
                 }
             }
             self.save_state(&state)?;
+        }
+
+        if self.cfg.recovery_enabled && !self.dry_run {
+            let _ = crate::recovery::sync_all(self.runner.as_ref(), &self.cfg);
         }
 
         if !self.dry_run {
@@ -2216,6 +2262,63 @@ impl App {
             old.push(path);
         }
         Ok(old)
+    }
+
+    fn cmd_recovery(
+        &mut self,
+        push: bool,
+        check: bool,
+        slug: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        let state = self.load_state()?;
+        let report = crate::recovery::render(&self.cfg, &state, Utc::now());
+        if let Some(slug) = slug {
+            if let Some(text) = report.projects.get(slug) {
+                write!(out, "{text}")?;
+            } else {
+                bail!("unknown project `{slug}`");
+            }
+        } else {
+            write!(out, "{}", report.global)?;
+        }
+        if push {
+            let paths = crate::recovery::write_local(&self.cfg, &report)?;
+            writeln!(
+                out,
+                "\nlocal snapshots: {} file(s) under {}",
+                paths.len(),
+                display_path(&self.cfg.state_dir_path().join("recovery"))
+            )?;
+            match crate::recovery::push(self.runner.as_ref(), &self.cfg, &report) {
+                Ok(count) => writeln!(out, "pushed {count} recovery file(s) to the VPS")?,
+                Err(err) => writeln!(out, "warning: recovery push failed: {err:#}")?,
+            }
+        }
+        if check {
+            match crate::recovery::remote_ages(self.runner.as_ref(), &self.cfg, &state) {
+                Ok(ages) => {
+                    writeln!(out, "\nremote recovery files:")?;
+                    for (name, age) in ages {
+                        match age {
+                            Some(age) => writeln!(
+                                out,
+                                "  {name}: updated {} ago{}",
+                                crate::util::format_secs(age),
+                                if age > self.cfg.recovery_interval_secs.saturating_mul(3) {
+                                    " (STALE)"
+                                } else {
+                                    ""
+                                }
+                            )?,
+                            None => writeln!(out, "  {name}: MISSING")?,
+                        }
+                    }
+                }
+                Err(err) => writeln!(out, "warning: recovery check failed: {err:#}")?,
+            }
+        }
+        Ok(())
     }
 
     fn cmd_completions(&mut self, shell: &str, out: &mut dyn Write) -> Result<()> {
@@ -3026,6 +3129,9 @@ impl App {
                 }
             }
         }
+        if self.cfg.recovery_enabled {
+            let _ = crate::recovery::sync_all(self.runner.as_ref(), &self.cfg);
+        }
         Ok(())
     }
 
@@ -3255,6 +3361,7 @@ mod tests {
             projects_root: root.join("projects").to_string_lossy().to_string(),
             state_dir: root.join("state").to_string_lossy().to_string(),
             max_parallel: 2,
+            recovery_enabled: false,
             ..Config::default()
         };
         let runner = Arc::new(FakeRunner::new(|spec| {
@@ -4860,6 +4967,36 @@ mod tests {
         assert_eq!(events[0].kind, EventKind::Questions);
         assert!(events[0].title.contains("1 question"));
         assert!(events[0].body.contains("expense"));
+    }
+
+    #[test]
+    fn up_writes_and_pushes_recovery_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.cfg.recovery_enabled = true;
+        app.cfg.recovery_interval_secs = 0;
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(
+            UpOptions {
+                no_github: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert!(app.cfg.state_dir_path().join("recovery/demo.md").exists());
+        assert!(app
+            .cfg
+            .state_dir_path()
+            .join("recovery/RECOVERY.md")
+            .exists());
+        let text =
+            std::fs::read_to_string(app.cfg.state_dir_path().join("recovery/demo.md")).unwrap();
+        assert!(text.contains("How to resume"), "{text}");
+        assert!(text.contains("m1"), "{text}");
+        let displays = app.runner_displays();
+        assert!(displays.iter().any(|d| d.contains("RECOVERY.md")));
     }
 
     #[test]
