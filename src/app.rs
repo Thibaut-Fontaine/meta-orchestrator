@@ -1149,7 +1149,7 @@ impl App {
             let milestone_progress = milestones::load_optional(&milestones::board_path(&dir))
                 .map(|board| milestones::progress(&board, Utc::now()));
             let (progress_label, eta_label) = match &milestone_progress {
-                Some(progress) => (progress.short(), progress.eta_label()),
+                Some(progress) => (progress.short(), progress.compact_eta()),
                 None => ("-".to_string(), "-".to_string()),
             };
             writeln!(

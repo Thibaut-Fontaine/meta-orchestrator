@@ -364,6 +364,10 @@ pub struct Progress {
     pub current_started_at: Option<DateTime<Utc>>,
     pub remaining_secs: u64,
     pub eta: Option<DateTime<Utc>>,
+    /// Seconds left in the current milestone (the task the agent is on now).
+    pub current_remaining_secs: Option<u64>,
+    /// When the current milestone should end.
+    pub current_eta: Option<DateTime<Utc>>,
     pub calibration: f64,
     pub blocked: bool,
     pub complete: bool,
@@ -386,6 +390,24 @@ impl Progress {
                 crate::util::format_secs(self.remaining_secs)
             ),
             None => "-".to_string(),
+        }
+    }
+
+    /// Compact ETA for the status table: `current/project` in local time.
+    pub fn compact_eta(&self) -> String {
+        if self.complete {
+            return "done".to_string();
+        }
+        if self.blocked {
+            return "blocked".to_string();
+        }
+        let fmt = |when: DateTime<Utc>| when.with_timezone(&Local).format("%H:%M").to_string();
+        match (self.current_eta, self.eta) {
+            (Some(current), Some(project)) if current != project => {
+                format!("{}/{}", fmt(current), fmt(project))
+            }
+            (_, Some(project)) => fmt(project),
+            _ => "-".to_string(),
         }
     }
 
@@ -478,6 +500,37 @@ pub fn progress(board: &Board, now: DateTime<Utc>) -> Progress {
     } else {
         ((done_weight as f64 / total_weight as f64) * 100.0).round() as u8
     };
+
+    // ETA for the milestone the agent is working on right now.
+    let current_remaining_secs = current.and_then(|milestone| {
+        if milestone.status == MilestoneStatus::Blocked {
+            return None;
+        }
+        let base = if milestone.estimate_secs > 0 {
+            milestone.estimate_secs as f64
+        } else {
+            (milestone.complexity.weight() as u64 * FALLBACK_SECS_PER_WEIGHT) as f64
+        };
+        let mut effective = base;
+        if milestone.status == MilestoneStatus::InProgress {
+            if let Some(started) = milestone.started_at {
+                let elapsed = now.signed_duration_since(started).num_seconds().max(0) as f64;
+                effective = (base - elapsed).max(60.0f64.min(base));
+            }
+        }
+        Some((effective * calibration).round() as u64)
+    });
+    let current_eta = if blocked {
+        None
+    } else {
+        current_remaining_secs.and_then(|secs| {
+            if secs > 0 {
+                Some(now + Duration::seconds(secs as i64))
+            } else {
+                None
+            }
+        })
+    };
     let last_event = board.events.last();
 
     Progress {
@@ -492,6 +545,8 @@ pub fn progress(board: &Board, now: DateTime<Utc>) -> Progress {
         current_started_at: current.and_then(|m| m.started_at),
         remaining_secs: remaining,
         eta,
+        current_remaining_secs,
+        current_eta,
         calibration,
         blocked,
         complete,
@@ -549,8 +604,17 @@ pub fn render_progress(board: &Board, now: DateTime<Utc>) -> String {
                 out.push_str(&format!("todos left: {open}\n"));
             }
         }
+        if let (Some(current_eta), Some(secs)) =
+            (progress.current_eta, progress.current_remaining_secs)
+        {
+            out.push_str(&format!(
+                "current milestone eta: {} (in {})\n",
+                current_eta.with_timezone(&Local).format("%H:%M"),
+                crate::util::format_secs(secs)
+            ));
+        }
         out.push_str(&format!(
-            "eta: {} · speed ×{:.2}\n",
+            "project eta: {} · speed ×{:.2}\n",
             progress.eta_label(),
             progress.calibration
         ));
@@ -883,6 +947,9 @@ mod tests {
         let p = progress(&board, now());
         // 600 - 300 = 300 remaining for m1, plus 1200 + 1800.
         assert_eq!(p.remaining_secs, 3300);
+        assert_eq!(p.current_remaining_secs, Some(300));
+        assert_eq!(p.current_eta, Some(now() + Duration::seconds(300)));
+        assert!(p.compact_eta().contains('/'));
     }
 
     #[test]

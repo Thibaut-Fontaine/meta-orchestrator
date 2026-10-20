@@ -214,15 +214,19 @@ mox milestone status
 
 ```text
 slug        status   compute  progress      eta                repo
-fetcher     running  light    m2/4 45%      15:42 (in 38m)     https://github.com/…
+fetcher     running  light    m2/4 45%      15:42/17:10        https://github.com/…
 ```
+
+The `eta` column reads `current milestone / project` (local time); the detailed
+view spells out the countdown in minutes.
 
 How the ETA is computed:
 
 1. progress is weighted by complexity, not by raw milestone count;
 2. completed milestones calibrate the plan: `actual / planned`, clamped to
    0.25–4×, so a project that runs 2× slower gets a 2× longer estimate;
-3. the current milestone's elapsed time is subtracted from its estimate;
+3. the current milestone's elapsed time is subtracted from its estimate, and
+   both the **current milestone ETA** and the **project ETA** are reported;
 4. a blocked milestone makes the ETA unavailable (`blocked`);
 5. a milestone without an estimate falls back to 30 minutes per weight unit.
 
