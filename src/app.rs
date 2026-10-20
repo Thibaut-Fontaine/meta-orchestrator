@@ -110,6 +110,7 @@ pub struct UpOptions {
     pub retry_failed: bool,
     pub target: String,
     pub owner: Option<String>,
+    pub detach: bool,
 }
 
 impl Default for UpOptions {
@@ -124,6 +125,7 @@ impl Default for UpOptions {
             retry_failed: false,
             target: "local".to_string(),
             owner: None,
+            detach: false,
         }
     }
 }
@@ -191,6 +193,7 @@ impl App {
                 retry_failed,
                 target,
                 owner,
+                detach,
             } => self.cmd_up(
                 UpOptions {
                     only,
@@ -202,6 +205,7 @@ impl App {
                     retry_failed,
                     target,
                     owner,
+                    detach,
                 },
                 out,
             ),
@@ -226,6 +230,10 @@ impl App {
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
+            Command::Bot { once } => {
+                let mut bot = crate::bot::Bot::new(&self.cfg, self.runner.clone())?;
+                bot.run(once)
+            }
             Command::Notify { action } => self.cmd_notify(action, out),
             Command::Stats { json, reset, yes } => self.cmd_stats(json, reset, yes, out),
             Command::Check {
@@ -257,6 +265,7 @@ impl App {
                 VpsCommand::Revoke { slug } => self.cmd_vps_revoke(&slug, out),
                 VpsCommand::Approvals => self.cmd_vps_approvals(out),
                 VpsCommand::Setup => self.cmd_vps_setup(out),
+                VpsCommand::Sync { slug } => self.cmd_vps_sync(slug.as_deref(), out),
                 VpsCommand::Plan { compute } => self.cmd_vps_plan(&compute, out),
             },
             Command::Ideas { file } => self.cmd_ideas(&file, out),
@@ -989,6 +998,9 @@ impl App {
             .target
             .parse()
             .map_err(|err: String| anyhow::anyhow!(err))?;
+        if opts.detach && target != crate::remote::Target::Vps {
+            bail!("`--detach` requires `--target vps` (detached runs live on the VPS)");
+        }
         let mut vps_probe = None;
         let mut remote_check = None;
         if target != crate::remote::Target::Local && !runnable.is_empty() {
@@ -1106,6 +1118,43 @@ impl App {
                 )?;
                 continue;
             }
+            if opts.detach {
+                match crate::remote::start_detached(
+                    self.runner.as_ref(),
+                    &self.cfg,
+                    spec,
+                    &dir,
+                    &prompt,
+                    &self.cfg.ssh_alias,
+                ) {
+                    Ok(pid) => {
+                        project.remote_pid = Some(pid);
+                        project.log_path = runner::log_path(&self.cfg, &spec.slug)
+                            .with_extension("remote.log")
+                            .display()
+                            .to_string();
+                        writeln!(
+                            out,
+                            "  {}: detached on VPS (pid {pid}); it continues if this computer shuts down",
+                            spec.slug
+                        )?;
+                        writeln!(
+                            out,
+                            "  run `mox vps sync --slug {}` later to fetch the result",
+                            spec.slug
+                        )?;
+                    }
+                    Err(err) => {
+                        project.status = ProjectStatus::Failed;
+                        project.last_error = Some(format!("could not start detached run: {err:#}"));
+                        writeln!(out, "  {}: {err:#}", spec.slug)?;
+                    }
+                }
+                state.upsert(project);
+                self.save_state(&state)?;
+                continue;
+            }
+
             let started = std::time::Instant::now();
             let result = crate::remote::execute(
                 self.runner.as_ref(),
@@ -1474,8 +1523,12 @@ impl App {
                     .join(",")
             };
             let pid = runner::read_pid(&self.cfg, &project.slug);
-            let stale = project.status == ProjectStatus::Running && pid.is_none();
-            let running = pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
+            let detached = project.target == "vps" && project.remote_pid.is_some();
+            let stale = project.status == ProjectStatus::Running && pid.is_none() && !detached;
+            let running = pid
+                .map(|pid| format!(" (pid {pid})"))
+                .or_else(|| project.remote_pid.map(|pid| format!(" (remote {pid})")))
+                .unwrap_or_default();
             let status_label = if stale {
                 "stale".to_string()
             } else {
@@ -1798,6 +1851,29 @@ impl App {
 
     fn cmd_stop(&mut self, slug: &str, out: &mut dyn Write) -> Result<()> {
         let mut state = self.load_state()?;
+        if let Some(project) = state.project(slug).cloned() {
+            if project.target == "vps" && project.remote_pid.is_some() {
+                if self.dry_run {
+                    writeln!(out, "[dry-run] would stop remote run `{slug}`")?;
+                    return Ok(());
+                }
+                let output = self.runner.run(&crate::remote::detached_stop_spec(
+                    &self.cfg,
+                    &self.cfg.ssh_alias,
+                    slug,
+                ))?;
+                if !output.success() {
+                    bail!("could not stop remote run: {}", output.tail(4));
+                }
+                state.update_status(slug, ProjectStatus::Stopped);
+                if let Some(p) = state.project_mut(slug) {
+                    p.remote_pid = None;
+                }
+                self.save_state(&state)?;
+                writeln!(out, "stopped remote run `{slug}`")?;
+                return Ok(());
+            }
+        }
         let Some(pid) = runner::read_pid(&self.cfg, slug) else {
             writeln!(out, "`{slug}` is not running (no pid file)")?;
             return Ok(());
@@ -2288,6 +2364,121 @@ impl App {
         Ok(())
     }
 
+    fn cmd_vps_sync(&mut self, slug: Option<&str>, out: &mut dyn Write) -> Result<()> {
+        self.ensure_layout()?;
+        let _lock = self.up_lock()?;
+        let mut state = self.load_state()?;
+        let candidates: Vec<String> = state
+            .ordered()
+            .into_iter()
+            .filter(|p| {
+                p.target == "vps"
+                    && p.status == ProjectStatus::Running
+                    && p.remote_pid.is_some()
+                    && slug.map(|s| s == p.slug).unwrap_or(true)
+            })
+            .map(|p| p.slug.clone())
+            .collect();
+        if candidates.is_empty() {
+            writeln!(out, "no detached VPS run to sync")?;
+            return Ok(());
+        }
+        for slug in candidates {
+            let Some(mut project) = state.project(&slug).cloned() else {
+                continue;
+            };
+            let dir = self.cfg.projects_root_path().join(&slug);
+            match crate::remote::poll_detached(
+                self.runner.as_ref(),
+                &self.cfg,
+                &self.cfg.ssh_alias,
+                &slug,
+            ) {
+                Ok(crate::remote::DetachedState::Running) => {
+                    let _ = self.runner.run(&crate::remote::rsync_board_spec(
+                        &self.cfg,
+                        &self.cfg.ssh_alias,
+                        &slug,
+                        &crate::milestones::board_path(&dir),
+                    ));
+                    let progress =
+                        crate::milestones::load_optional(&crate::milestones::board_path(&dir))
+                            .map(|board| crate::milestones::progress(&board, Utc::now()));
+                    match progress {
+                        Some(p) => writeln!(
+                            out,
+                            "{}: still running · {} · ETA {}",
+                            slug,
+                            p.short(),
+                            p.compact_eta()
+                        )?,
+                        None => writeln!(out, "{slug}: still running")?,
+                    }
+                }
+                Ok(crate::remote::DetachedState::Done { code }) => {
+                    let log = self.cfg.logs_dir().join(format!("{slug}.remote.log"));
+                    let outcome = crate::remote::finish_detached(
+                        self.runner.as_ref(),
+                        &self.cfg,
+                        &slug,
+                        &dir,
+                        &self.cfg.ssh_alias,
+                        code,
+                        log.clone(),
+                    )?;
+                    project.remote_pid = None;
+                    project.exit_code = code;
+                    project.pid = None;
+                    project.log_path = log.display().to_string();
+                    let ok = code == Some(0) && outcome.merge_note.is_none();
+                    if ok {
+                        let verification =
+                            crate::verify::verify(self.runner.as_ref(), &self.cfg, &dir);
+                        if let Some(reason) = verification.reason() {
+                            project.status = ProjectStatus::Failed;
+                            project.last_error = Some(reason.clone());
+                            writeln!(out, "{slug}: failed ({reason})")?;
+                        } else {
+                            project.status = ProjectStatus::Completed;
+                            project.last_error = None;
+                            writeln!(out, "{slug}: completed and fetched back")?;
+                        }
+                    } else {
+                        project.status = ProjectStatus::Failed;
+                        let reason = outcome.merge_note.clone().unwrap_or_else(|| {
+                            if code == Some(124) {
+                                format!("remote run timed out after {}s", self.cfg.run_timeout_secs)
+                            } else {
+                                format!("remote run exited with {code:?}")
+                            }
+                        });
+                        project.last_error = Some(reason.clone());
+                        writeln!(out, "{slug}: failed ({reason})")?;
+                    }
+                    let kind = if project.status == ProjectStatus::Completed {
+                        EventKind::Finished
+                    } else {
+                        EventKind::Failed
+                    };
+                    self.announce(
+                        Event::new(
+                            kind,
+                            format!("{slug}: {}", project.status.as_str()),
+                            format!("remote log: {}", display_path(&log)),
+                        ),
+                        out,
+                    );
+                    state.upsert(project);
+                    self.save_state(&state)?;
+                }
+                Err(err) => {
+                    writeln!(out, "{slug}: could not poll remote: {err:#}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn cmd_vps_setup(&mut self, out: &mut dyn Write) -> Result<()> {
         let check = crate::remote::check(self.runner.as_ref(), &self.cfg, &self.cfg.ssh_alias);
         writeln!(out, "remote prerequisites for `{}`:", self.cfg.ssh_alias)?;
@@ -2622,6 +2813,20 @@ mod tests {
                         ..crate::exec::Output::default()
                     };
                 }
+                if command.contains("setsid") {
+                    return crate::exec::Output {
+                        code: Some(0),
+                        stdout: "4242\n".into(),
+                        ..crate::exec::Output::default()
+                    };
+                }
+                if command.contains("STATE=RUNNING") || command.contains("remote.exit") {
+                    return crate::exec::Output {
+                        code: Some(0),
+                        stdout: "STATE=DONE EXIT=0\n".into(),
+                        ..crate::exec::Output::default()
+                    };
+                }
                 return crate::exec::Output::ok();
             }
             if spec.program == "git" && spec.args.contains(&"status".to_string()) {
@@ -2706,6 +2911,43 @@ mod tests {
         assert!(displays.iter().any(|d| d.starts_with("rsync -az")));
         assert!(displays.iter().any(|d| d.contains("ssh")));
         assert!(displays.iter().any(|d| d.contains("git fetch")));
+    }
+
+    #[test]
+    fn detached_vps_run_survives_and_syncs_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.runner = Arc::new(remote_runner());
+        state_with_demo(&app);
+        let mut out = Vec::new();
+        app.cmd_vps_allow("demo", "detached ok", &mut out).unwrap();
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(
+            UpOptions {
+                no_github: true,
+                target: "vps".into(),
+                detach: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        let project = state.project("demo").unwrap();
+        assert_eq!(project.status, ProjectStatus::Running);
+        assert_eq!(project.remote_pid, Some(4242));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("detached on VPS"), "{text}");
+
+        let mut out = Vec::new();
+        app.cmd_vps_sync(None, &mut out).unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        let project = state.project("demo").unwrap();
+        assert_eq!(project.status, ProjectStatus::Completed);
+        assert_eq!(project.remote_pid, None);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("completed and fetched back"), "{text}");
     }
 
     #[test]

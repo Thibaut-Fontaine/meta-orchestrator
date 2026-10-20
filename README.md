@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 275 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 287 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -104,6 +104,9 @@ Useful flags:
 | `mox up --max-parallel 3` | override concurrency |
 | `mox up --resume` / `--retry-failed` | skip completed / retry failed or stopped only |
 | `mox up --target vps` / `--target auto` | run on the VPS (approval required) / choose per project |
+| `mox up --target vps --detach` | start a VPS run that survives shutting the workstation down |
+| `mox vps sync [--slug slug]` | poll detached runs, fetch finished work back, update status |
+| `mox bot` / `mox bot --once` | read-only Telegram bot (long-poll / one batch) |
 | `mox up --owner ORG` | create the private repo under an org |
 | `mox --run-timeout 1800 up` | wall-clock cap per agent run (seconds) |
 | `mox status` | table with milestone progress and ETA |
@@ -303,10 +306,40 @@ the git history back as a bundle:
    merge is attempted. If it does not fast-forward, the project is marked
    `failed` with a "merge required" note — the workstation is never overwritten.
 
-A run that cannot fast-forward leaves the remote branch intact for review. The
-VPS is not cloned from GitHub and `gh` credentials are not needed there. Stop is
-local: killing `mox` aborts the ssh client, while the remote `timeout` is the
-hard guarantee; remote process cleanup is a known limitation.
+For always-on work use `--detach`: mox uploads a small runner script plus the
+mox binary, starts it with `setsid nohup` on the VPS, records the remote pid and
+returns. The run survives your workstation shutting down. Later:
+
+```bash
+mox vps sync                # all detached runs
+mox vps sync --slug demo    # one project
+```
+
+`sync` fetches the live milestone board while running, or the final board, log,
+git bundle and fast-forward merge when done. `mox stop <slug>` sends SIGTERM to
+the remote process group. A remote `timeout` still bounds every run.
+
+The VPS needs `opencode` and model auth configured **on the VPS**; mox never
+copies keys or tokens. `mox vps setup` reports exactly what is missing. The VPS
+is not cloned from GitHub, so no `gh` credentials are needed there.
+
+## Telegram bot
+
+`mox bot` is a read-only Telegram bot. It long-polls `getUpdates` (token from
+`MOX_TELEGRAM_TOKEN`, chat allowlisted by `telegram_chat_id`):
+
+* `/projects` — inline buttons per project;
+* `/project <slug>` — status, target, current milestone, ETA, open todos,
+  blockers, `STATUS.md`, last error;
+* `/status`, `/milestones [slug]`, `/todos [slug]`;
+* `/checks`, `/questions` — due checks, plan questions and blockers;
+* `/stats`, `/report`, `/logs <slug> [n]`;
+* buttons for Milestones / Todos / Checks / Logs / Report.
+
+It never mutates projects, starts agents, answers questions or reads secrets.
+Run it under a systemd **user** service if you want it always available; it can
+only see state where it runs. For a bot that stays up while this workstation is
+off, run it on the VPS once mox state lives there (future work).
 
 ## Safety rules (enforced, not just documented)
 
@@ -474,7 +507,8 @@ prior.
 | `verify` | post-run dirty-tree / unpushed-commit verification |
 | `milestones` | boards, transitions, weighted progress and ETA |
 | `stats` | cross-project timing history and the first-milestone prior |
-| `remote` | rsync/ssh run, git bundle fetch-back, remote preflight |
+| `remote` | rsync/ssh run, detached runner, git bundle fetch-back, preflight |
+| `bot` | read-only Telegram long-poll, navigation and ETA views |
 | `hooks` | pre-commit guard for large files and secrets |
 | `host` | CPU model/cores/GHz/RAM passed to the planner |
 | `notify` | Telegram, desktop and webhook channels (secrets out of argv) |
@@ -483,7 +517,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 275 unit + 8 end-to-end tests
+cargo test                 # 287 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

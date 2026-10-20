@@ -67,6 +67,10 @@ impl State {
         self.projects.get(slug)
     }
 
+    pub fn project_mut(&mut self, slug: &str) -> Option<&mut ProjectState> {
+        self.projects.get_mut(slug)
+    }
+
     /// Projects in stable (alphabetical) order.
     pub fn ordered(&self) -> Vec<&ProjectState> {
         self.projects.values().collect()

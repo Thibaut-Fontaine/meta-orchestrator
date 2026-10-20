@@ -109,6 +109,10 @@ pub enum Command {
         /// GitHub owner/org for new repositories (default: authenticated user).
         #[arg(long, value_name = "OWNER")]
         owner: Option<String>,
+
+        /// Start VPS runs detached (survives shutting this computer down).
+        #[arg(long)]
+        detach: bool,
     },
 
     /// Show the state of every project, with milestone progress and ETA.
@@ -240,6 +244,13 @@ pub enum Command {
         /// Confirm the reset.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Read-only Telegram bot for projects, milestones, todos, checks and ETA.
+    Bot {
+        /// Process one long-poll batch and exit (debug/cron).
+        #[arg(long)]
+        once: bool,
     },
 
     /// Send or inspect notifications (Telegram, desktop, webhook).
@@ -443,6 +454,12 @@ pub enum VpsCommand {
     Approvals,
     /// Check the remote prerequisites for VPS execution.
     Setup,
+    /// Poll detached VPS runs, fetch finished work back, and update status.
+    Sync {
+        /// Only this project slug.
+        #[arg(long)]
+        slug: Option<String>,
+    },
     /// Print an OVHcloud provisioning checklist for a workload.
     Plan {
         /// light, medium, heavy or gpu.
@@ -509,6 +526,7 @@ mod tests {
                 retry_failed,
                 target,
                 owner,
+                detach,
                 ..
             } => {
                 assert_eq!(only, vec!["alpha", "beta"]);
@@ -517,6 +535,7 @@ mod tests {
                 assert!(!resume && !retry_failed);
                 assert_eq!(target, "local");
                 assert!(owner.is_none());
+                assert!(!detach);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -682,6 +701,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_detach_and_vps_sync() {
+        let cli = Cli::try_parse_from(["mox", "up", "--detach"]).unwrap();
+        assert!(matches!(cli.command, Command::Up { detach: true, .. }));
+        let cli = Cli::try_parse_from(["mox", "vps", "sync", "--slug", "demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Sync { slug: Some(ref s) }
+            } if s == "demo"
+        ));
+    }
+
+    #[test]
     fn parses_up_target_and_vps_setup() {
         let cli = Cli::try_parse_from(["mox", "up", "--target", "vps"]).unwrap();
         assert!(matches!(
@@ -785,6 +817,12 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["mox", "check", "--top", "3"]).unwrap();
         assert!(matches!(cli.command, Command::Check { top: Some(3), .. }));
+    }
+
+    #[test]
+    fn parses_bot() {
+        let cli = Cli::try_parse_from(["mox", "bot", "--once"]).unwrap();
+        assert!(matches!(cli.command, Command::Bot { once: true }));
     }
 
     #[test]

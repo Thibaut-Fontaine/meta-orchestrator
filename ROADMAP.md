@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.5.0** · 275 unit tests + 8 end-to-end tests · private repo,
+Status: **v0.6.0** · 287 unit tests + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -19,6 +19,8 @@ Status: **v0.5.0** · 275 unit tests + 8 end-to-end tests · private repo,
 | Machine-aware planning | CPU model, physical/logical cores, max GHz and RAM are passed to the planner; algorithmic complexity + input scale inform estimates | ✅ |
 | Cross-project statistics | Completed milestone timings are stored under a lock; median/p90 actual/planned ratios seed the first-milestone ETA | ✅ |
 | VPS execution | Explicit `--target vps`, one-time approval, rsync mirror, ssh run, git-bundle fetch-back, OVH checklist | ✅ code (VPS needs opencode + auth) |
+| Always-on remote | `--detach` starts a setsid run that survives the workstation; `mox vps sync` fetches progress/results | ✅ code |
+| Telegram bot | Read-only long-poll bot: projects, milestones, todos, checks, questions, ETA, logs, report | ✅ |
 | Easy build | `./build.sh` (release, `--test`, `--debug`, `--install`, `--offline`) | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
@@ -240,7 +242,9 @@ Goal: actually use the VPS and remote plans, not just recommend them.
       projects are rsynced to `~/mox-remote/<slug>` (no GitHub credentials, no
       keys copied). *(P1, L)*
 - [x] Remote run via ssh with a remote `timeout`, project-local caches and a
-      remote log at `.mox/logs/<slug>.remote.log`. *(P1, L)*
+      remote log; `--detach` (setsid) survives the local machine shutting down
+      and `mox vps sync` fetches progress/results. `mox stop` kills the remote
+      process group. *(P1, L)*
 - [x] Fetch back with `git bundle` into `refs/remotes/mox-remote/*` and
       fast-forward merge; divergence is reported, never forced. *(P1, M)*
 - [x] `mox vps plan --compute heavy` OVHcloud checklist. *(P2, S)*
@@ -300,14 +304,13 @@ Next, in this order:
 
 1. **Remote owner setup:** install `opencode` on the VPS and configure model
    auth there; run `mox vps setup` until it is green.
-2. **Remote stop/cleanup:** propagate stop to the remote process group.
-3. **Planning second pass** from answers into a refined spec and `TASKS.md`.
-4. **Checks:** recurrence, VPS health probes, configurable timezone, project
+2. **Planning second pass** from answers into a refined spec and `TASKS.md`.
+3. **Checks:** recurrence, VPS health probes, configurable timezone, project
    path/commit context.
-5. **Project lifecycle:** `remove` and `adopt`.
-6. **Resilience:** retry backoff, disk watchdog, log retention, `events.jsonl`,
+4. **Project lifecycle:** `remove` and `adopt`.
+5. **Resilience:** retry backoff, disk watchdog, log retention, `events.jsonl`,
    token/cost budgets.
-7. **Packaging:** completions, man page, init profiles, release artifacts,
+6. **Packaging:** completions, man page, init profiles, release artifacts,
    coverage, architecture/security docs, changelog.
 
 ---
@@ -317,8 +320,9 @@ Next, in this order:
 - **Remote execution needs owner setup:** install `opencode` on the VPS and
   configure model auth there. mox deliberately never copies credentials.
   `mox vps setup` reports exactly what is missing.
-- **Remote stop/cleanup:** killing mox aborts the ssh client; the remote
-  `timeout` is the hard stop. No remote process-group cleanup yet.
+- **24/7 Telegram bot:** the bot sees state where it runs. For notifications
+  while the workstation is off, run the bot on the VPS once remote state lives
+  there (or keep a small always-on controller).
 - **Planning second pass** from answers into a refined spec/`TASKS.md`.
 - **Checks:** recurrence (`every: 1d`), VPS health probes, local-timezone config,
   linked project path/commit.

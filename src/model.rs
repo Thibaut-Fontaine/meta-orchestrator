@@ -356,6 +356,9 @@ pub struct ProjectState {
     /// Last execution target: local, vps or a remote alias.
     #[serde(default = "default_target")]
     pub target: String,
+    /// Pid of a detached remote run (survives the local machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_pid: Option<u32>,
 }
 
 fn default_target() -> String {
@@ -385,6 +388,7 @@ impl ProjectState {
             duration_secs: 0,
             attempts: 0,
             target: "local".to_string(),
+            remote_pid: None,
         }
     }
 }

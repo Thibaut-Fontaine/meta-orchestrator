@@ -13,7 +13,7 @@
 use crate::config::Config;
 use crate::exec::{run_checked, CommandRunner, CommandSpec, Output};
 use crate::model::ProjectSpec;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +147,234 @@ pub fn rsync_board_spec(cfg: &Config, alias: &str, slug: &str, local_board: &Pat
         .args(["-az", "--timeout=60"])
         .arg(format!("{alias}:{}/MILESTONES.json", remote_dir(cfg, slug)))
         .arg(local_board.display().to_string())
+        .timeout(120)
+}
+
+/// Generic single-file rsync to the remote project.
+pub fn rsync_file_spec(
+    cfg: &Config,
+    alias: &str,
+    slug: &str,
+    local: &Path,
+    remote_rel: &str,
+) -> CommandSpec {
+    CommandSpec::new(&cfg.rsync_bin)
+        .args(["-az", "--timeout=120"])
+        .arg(local.display().to_string())
+        .arg(format!("{alias}:{}/{}", remote_dir(cfg, slug), remote_rel))
+        .timeout(300)
+}
+
+/// Script executed by the detached remote run.
+pub fn detached_script(cfg: &Config, slug: &str, timeout_secs: u64) -> String {
+    let dir = remote_dir(cfg, slug);
+    let bin = &cfg.remote_opencode_bin;
+    format!(
+        "#!/bin/sh\n\
+         cd {dir} || exit 1\n\
+         export PATH=\"$PWD/.mox/bin:$PATH\"\n\
+         export TMPDIR=\"$PWD/.mox/tmp\" CARGO_TARGET_DIR=\"$PWD/.mox/cache/cargo-target\"\n\
+         export npm_config_cache=\"$PWD/.mox/cache/npm\" PIP_CACHE_DIR=\"$PWD/.mox/cache/pip\"\n\
+         export GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1\n\
+         export GIT_AUTHOR_NAME=mox GIT_AUTHOR_EMAIL=mox@localhost\n\
+         export GIT_COMMITTER_NAME=mox GIT_COMMITTER_EMAIL=mox@localhost\n\
+         nice -n 10 timeout {timeout_secs} {bin} run --auto --standalone \\\n\
+           --title \"mox: {slug} (remote)\" \"$(cat .mox/prompt.txt)\"\n\
+         code=$?\n\
+         echo \"$code\" > .mox/remote.exit\n"
+    )
+}
+
+pub fn write_prompt_spec(cfg: &Config, alias: &str, slug: &str, prompt: &str) -> CommandSpec {
+    let encoded = crate::util::base64_encode(prompt.as_bytes());
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "mkdir -p {}/.mox && printf %s '{encoded}' | base64 -d > {}/.mox/prompt.txt",
+            remote_dir(cfg, slug),
+            remote_dir(cfg, slug)
+        ),
+        60,
+    )
+}
+
+pub fn detached_start_spec(cfg: &Config, alias: &str, slug: &str) -> CommandSpec {
+    let dir = remote_dir(cfg, slug);
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "cd {dir} && chmod +x .mox/run.sh && (setsid nohup .mox/run.sh > .mox/remote.log 2>&1 & echo $! > .mox/remote.pid) && sleep 1 && cat .mox/remote.pid"
+        ),
+        60,
+    )
+}
+
+pub fn detached_poll_spec(cfg: &Config, alias: &str, slug: &str) -> CommandSpec {
+    let dir = remote_dir(cfg, slug);
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "cd {dir} && if [ -f .mox/remote.exit ]; then echo \"STATE=DONE EXIT=$(cat .mox/remote.exit)\"; elif [ -f .mox/remote.pid ] && kill -0 \"$(cat .mox/remote.pid)\" 2>/dev/null; then echo STATE=RUNNING; else echo STATE=DONE EXIT=unknown; fi"
+        ),
+        30,
+    )
+}
+
+pub fn detached_stop_spec(cfg: &Config, alias: &str, slug: &str) -> CommandSpec {
+    let dir = remote_dir(cfg, slug);
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "cd {dir} && if [ -f .mox/remote.pid ]; then kill -TERM -\"$(cat .mox/remote.pid)\" 2>/dev/null || kill -TERM \"$(cat .mox/remote.pid)\" 2>/dev/null; rm -f .mox/remote.pid; echo STOPPED; else echo NOT_RUNNING; fi"
+        ),
+        30,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedState {
+    Running,
+    Done { code: Option<i32> },
+}
+
+pub fn parse_detached_poll(stdout: &str) -> DetachedState {
+    let line = stdout.trim();
+    if line.contains("STATE=RUNNING") {
+        return DetachedState::Running;
+    }
+    let code = line
+        .split("EXIT=")
+        .nth(1)
+        .and_then(|v| v.trim().parse::<i32>().ok());
+    DetachedState::Done { code }
+}
+
+/// Start a detached run and return its pid.
+pub fn start_detached(
+    runner: &dyn CommandRunner,
+    cfg: &Config,
+    spec: &ProjectSpec,
+    project_dir: &Path,
+    prompt: &str,
+    alias: &str,
+) -> Result<u32> {
+    let slug = &spec.slug;
+    run_checked(
+        runner,
+        &rsync_to_spec(cfg, project_dir, alias, slug),
+        "rsync to VPS",
+    )?;
+    run_checked(
+        runner,
+        &mkdir_spec(cfg, alias, slug),
+        "creating remote .mox",
+    )?;
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = runner.run(&rsync_mox_spec(cfg, alias, slug, &exe));
+    }
+    run_checked(
+        runner,
+        &write_prompt_spec(cfg, alias, slug, prompt),
+        "writing remote prompt",
+    )?;
+    let script = detached_script(cfg, slug, cfg.run_timeout_secs);
+    let script_path = cfg.internal_dir().join(format!("remote-{slug}-run.sh"));
+    crate::util::ensure_dir_private(&cfg.internal_dir())?;
+    crate::util::write_private(&script_path, script)?;
+    run_checked(
+        runner,
+        &rsync_file_spec(cfg, alias, slug, &script_path, ".mox/run.sh"),
+        "shipping detached runner",
+    )?;
+    let output = run_checked(
+        runner,
+        &detached_start_spec(cfg, alias, slug),
+        "starting detached run",
+    )?;
+    let pid: u32 = output
+        .stdout
+        .trim()
+        .parse()
+        .context("remote did not return a pid")?;
+    Ok(pid)
+}
+
+pub fn poll_detached(
+    runner: &dyn CommandRunner,
+    cfg: &Config,
+    alias: &str,
+    slug: &str,
+) -> Result<DetachedState> {
+    let output = runner.run(&detached_poll_spec(cfg, alias, slug))?;
+    if !output.success() {
+        bail!("remote poll failed: {}", output.tail(4));
+    }
+    Ok(parse_detached_poll(&output.stdout))
+}
+
+/// Fetch the final board and git history after a detached run.
+pub fn finish_detached(
+    runner: &dyn CommandRunner,
+    cfg: &Config,
+    slug: &str,
+    project_dir: &Path,
+    alias: &str,
+    code: Option<i32>,
+    log_path: PathBuf,
+) -> Result<RemoteOutcome> {
+    let _ = runner.run(&rsync_board_spec(
+        cfg,
+        alias,
+        slug,
+        &crate::milestones::board_path(project_dir),
+    ));
+    if let Some(parent) = log_path.parent() {
+        crate::util::ensure_dir_private(parent)?;
+    }
+    let _ = runner.run(&rsync_log_spec(cfg, alias, slug, &log_path));
+    let mut fetched = false;
+    let mut merge_note = None;
+    crate::util::ensure_dir_private(&cfg.internal_dir())?;
+    let bundle = cfg.internal_dir().join(format!("remote-{slug}.bundle"));
+    if runner.run(&bundle_spec(cfg, alias, slug))?.success()
+        && runner
+            .run(&rsync_bundle_spec(cfg, alias, slug, &bundle))?
+            .success()
+    {
+        let fetch = runner.run(&fetch_spec(cfg, project_dir, &bundle))?;
+        if fetch.success() {
+            fetched = true;
+            let merge = runner.run(&merge_spec(cfg, project_dir))?;
+            if !merge.success() {
+                merge_note = Some(format!(
+                    "remote commits fetched to mox-remote/main but not merged: {}",
+                    merge.tail(3)
+                ));
+            }
+        }
+    }
+    let output = Output {
+        code,
+        timed_out: code == Some(124),
+        ..Output::default()
+    };
+    Ok(RemoteOutcome {
+        output,
+        log_path,
+        fetched,
+        merge_note,
+    })
+}
+
+pub fn rsync_log_spec(cfg: &Config, alias: &str, slug: &str, local: &Path) -> CommandSpec {
+    CommandSpec::new(&cfg.rsync_bin)
+        .args(["-az", "--timeout=60"])
+        .arg(format!("{alias}:{}/.mox/remote.log", remote_dir(cfg, slug)))
+        .arg(local.display().to_string())
         .timeout(120)
 }
 
@@ -429,6 +657,60 @@ mod tests {
         let missing = parse_preflight("RSYNC=/usr/bin/rsync\nGIT=\nOPENCODE=\nDISK_MB=1\n");
         assert!(!missing.ready());
         assert_eq!(missing.missing(), vec!["git", "opencode"]);
+    }
+
+    #[test]
+    fn detached_script_has_timeout_and_exit_code() {
+        let cfg = cfg();
+        let script = detached_script(&cfg, "demo", 600);
+        assert!(script.contains("timeout 600 opencode"));
+        assert!(script.contains("remote.exit"));
+        assert!(script.contains("PATH=\"$PWD/.mox/bin:$PATH\""));
+        assert!(script.contains("--standalone"));
+    }
+
+    #[test]
+    fn parses_detached_state() {
+        assert_eq!(
+            parse_detached_poll("STATE=RUNNING\n"),
+            DetachedState::Running
+        );
+        assert_eq!(
+            parse_detached_poll("STATE=DONE EXIT=0\n"),
+            DetachedState::Done { code: Some(0) }
+        );
+        assert_eq!(
+            parse_detached_poll("STATE=DONE EXIT=unknown\n"),
+            DetachedState::Done { code: None }
+        );
+    }
+
+    #[test]
+    fn detached_start_ships_script_and_returns_pid() {
+        let runner = FakeRunner::new(|spec| {
+            if spec.program == "ssh" {
+                let command = spec.args.last().cloned().unwrap_or_default();
+                if command.contains("setsid") {
+                    return Output {
+                        code: Some(0),
+                        stdout: "4242\n".into(),
+                        ..Output::default()
+                    };
+                }
+            }
+            Output::ok()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            projects_root: dir.path().join("projects").display().to_string(),
+            state_dir: dir.path().join("state").display().to_string(),
+            ..Config::default()
+        };
+        let pid = start_detached(&runner, &cfg, &spec(), dir.path(), "x", "vps-ovh").unwrap();
+        assert_eq!(pid, 4242);
+        let displays = runner.displays();
+        assert!(displays.iter().any(|d| d.contains("setsid nohup")));
+        assert!(displays.iter().any(|d| d.contains(".mox/run.sh")));
     }
 
     #[test]

@@ -48,6 +48,9 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
     the VPS. The VPS needs its own `opencode` and model auth. The workstation is
     the source of truth; remote work is fetched as a bundle and only
     fast-forward merged (a diverged remote branch is reported, never forced).
+14. `mox bot` is read-only. It must enforce the configured chat-id allowlist,
+    never expose tokens in argv, and never mutate projects, start agents or
+    answer questions.
 
 ## Engineering rules
 

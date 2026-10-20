@@ -11,6 +11,7 @@
 //! * [`app`] / [`cli`] — command implementations and argument parsing.
 
 pub mod app;
+pub mod bot;
 pub mod brain;
 pub mod checks;
 pub mod clean;
