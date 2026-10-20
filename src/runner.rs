@@ -89,6 +89,11 @@ pub fn build_run_command(cfg: &Config, run: &ProjectRun) -> CommandSpec {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1")
         .env("CARGO_TERM_COLOR", "never")
+        // Guard wrappers first on PATH: git/gh/ssh/kill/systemctl rules.
+        .env(
+            "PATH",
+            crate::util::path_with_prefix(&crate::guard::bin_dir(cfg, &run.slug)),
+        )
         .pid_file(pid_path(cfg, &run.slug));
 
     if cfg.auto_approve {
@@ -268,6 +273,7 @@ mod tests {
                 "--auto",
                 "--model",
                 "test/model",
+                "--standalone",
                 "--title",
                 "mox: demo",
                 "the prompt"
@@ -281,6 +287,7 @@ mod tests {
             .unwrap()
             .contains("cache/cargo-target/demo"));
         assert_eq!(cmd.env.get("GIT_TERMINAL_PROMPT").unwrap(), "0");
+        assert!(cmd.env.get("PATH").unwrap().contains("guard/demo/bin"));
         assert_eq!(cmd.env.get("GH_PROMPT_DISABLED").unwrap(), "1");
         assert!(cmd.pid_file.is_some());
         assert_eq!(cmd.timeout_secs, cfg.run_timeout_secs);

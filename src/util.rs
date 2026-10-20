@@ -234,6 +234,72 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+/// Set a file or directory mode (no-op on non-Unix platforms).
+#[cfg(unix)]
+pub fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+pub fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Create a directory (and parents) with mode 0700.
+pub fn ensure_dir_private(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    set_mode(path, 0o700)
+}
+
+/// Write a file with mode 0600 (used for state, logs, prompts, checks).
+pub fn write_private(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    set_mode(path, 0o600)
+}
+
+/// Open a file for appending, creating it with mode 0600 and enforcing the mode
+/// even if it already existed with looser permissions.
+pub fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let _ = set_mode(path, 0o600);
+    Ok(file)
+}
+
+/// Resolve an executable name against `PATH` (absolute paths are returned as-is).
+pub fn resolve_executable(name: &str) -> PathBuf {
+    let path = Path::new(name);
+    if path.is_absolute() || name.contains('/') {
+        return path.to_path_buf();
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Current `PATH` with `dir` prepended.
+pub fn path_with_prefix(dir: &Path) -> String {
+    let existing = std::env::var("PATH").unwrap_or_default();
+    format!("{}:{}", dir.display(), existing)
+}
+
 /// True when `path` is inside `root` after lexical normalisation and neither
 /// path escapes through `..` components. This is a guard for destructive
 /// operations; it deliberately does not resolve symlinks.
@@ -344,6 +410,41 @@ Thanks."#;
         assert!(!is_inside(root, Path::new("/home/u/projects")));
         assert!(!is_inside(root, Path::new("/home/u/other")));
         assert!(!is_inside(root, Path::new("/home/u/projects/../secret")));
+    }
+
+    #[test]
+    fn private_helpers_set_modes() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let nested = dir.path().join("a/b");
+            ensure_dir_private(&nested).unwrap();
+            assert_eq!(
+                std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            let file = nested.join("secret.txt");
+            write_private(&file, b"x").unwrap();
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let append = nested.join("log.txt");
+            open_private_append(&append).unwrap();
+            assert_eq!(
+                std::fs::metadata(&append).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_executables_from_path() {
+        let resolved = resolve_executable("sh");
+        assert!(resolved.is_absolute() || resolved == Path::new("sh"));
+        assert_eq!(resolve_executable("/bin/sh"), PathBuf::from("/bin/sh"));
+        assert!(path_with_prefix(Path::new("/tmp/g")).starts_with("/tmp/g:"));
     }
 
     #[test]

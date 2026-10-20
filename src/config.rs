@@ -55,6 +55,16 @@ pub struct Config {
     pub standalone: bool,
     /// Extra instructions appended to every project prompt.
     pub extra_instructions: String,
+
+    /// Desktop notifications via `notify-send`.
+    pub notify_desktop: bool,
+    /// Telegram bot notifications. The token is read from an env var.
+    pub notify_telegram: bool,
+    pub telegram_chat_id: String,
+    pub telegram_token_env: String,
+    /// Generic JSON webhook notifications.
+    pub notify_webhook: bool,
+    pub webhook_url: String,
 }
 
 impl Default for Config {
@@ -79,8 +89,16 @@ impl Default for Config {
             run_timeout_secs: 7200,
             model: String::new(),
             auto_approve: true,
-            standalone: false,
+            // A private server per agent inherits PATH/TMPDIR/CARGO_TARGET_DIR,
+            // which is what makes guardrails and cache isolation effective.
+            standalone: true,
             extra_instructions: String::new(),
+            notify_desktop: false,
+            notify_telegram: false,
+            telegram_chat_id: String::new(),
+            telegram_token_env: "MOX_TELEGRAM_TOKEN".to_string(),
+            notify_webhook: false,
+            webhook_url: String::new(),
         }
     }
 }
@@ -295,6 +313,15 @@ model = {model:?}
 auto_approve = {auto_approve}
 standalone = {standalone}
 extra_instructions = {extra_instructions:?}
+
+# Notifications (optional). Telegram token stays in the environment:
+#   export MOX_TELEGRAM_TOKEN=...   (from @BotFather)
+notify_desktop = {notify_desktop}
+notify_telegram = {notify_telegram}
+telegram_chat_id = {telegram_chat_id:?}
+telegram_token_env = {telegram_token_env:?}
+notify_webhook = {notify_webhook}
+webhook_url = {webhook_url:?}
 "#,
             projects_root = self.projects_root,
             state_dir = self.state_dir,
@@ -317,6 +344,12 @@ extra_instructions = {extra_instructions:?}
             auto_approve = self.auto_approve,
             standalone = self.standalone,
             extra_instructions = self.extra_instructions,
+            notify_desktop = self.notify_desktop,
+            notify_telegram = self.notify_telegram,
+            telegram_chat_id = self.telegram_chat_id,
+            telegram_token_env = self.telegram_token_env,
+            notify_webhook = self.notify_webhook,
+            webhook_url = self.webhook_url,
         )
     }
 
@@ -381,7 +414,7 @@ mod tests {
         assert!(cfg.max_parallel >= 1);
         assert!(cfg.min_free_disk_mb >= 1024);
         assert!(cfg.auto_approve);
-        assert!(!cfg.standalone);
+        assert!(cfg.standalone);
         assert_eq!(cfg.ssh_alias, "vps-ovh");
     }
 

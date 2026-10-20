@@ -5,6 +5,8 @@ use meta_orchestrator::brain::OpenCodeBrain;
 use meta_orchestrator::cli::Cli;
 use meta_orchestrator::config::{default_config_path, Config};
 use meta_orchestrator::exec::RealRunner;
+use meta_orchestrator::guard;
+use meta_orchestrator::notify;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
@@ -17,10 +19,19 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let meta_orchestrator::cli::Command::Guard { program, args } = &cli.command {
+        guard::dispatch(program, args);
+    }
     let cfg_path = cli.config.clone().unwrap_or_else(default_config_path);
     let mut cfg = Config::load(Some(&cfg_path))?;
     if let Some(root) = &cli.projects_root {
         cfg.projects_root = root.display().to_string();
+    }
+    if let Some(timeout) = cli.run_timeout {
+        if timeout == 0 {
+            anyhow::bail!("--run-timeout must be greater than zero");
+        }
+        cfg.run_timeout_secs = timeout;
     }
     cfg.validate()?;
 
@@ -38,7 +49,9 @@ fn run() -> Result<()> {
 
     let runner = Arc::new(RealRunner::new());
     let brain = Arc::new(OpenCodeBrain::new(runner.clone(), &cfg));
-    let mut app = App::new(cfg, cfg_path, runner, brain, dry_run, interactive);
+    let notifier = notify::from_config(&cfg, runner.clone());
+    let mut app =
+        App::new(cfg, cfg_path, runner, brain, dry_run, interactive).with_notifier(notifier);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();

@@ -177,10 +177,10 @@ pub trait CommandRunner: Send + Sync {
 
 fn append(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    if let Some(parent) = path.parent() {
+        crate::util::ensure_dir_private(parent)?;
+    }
+    let mut file = crate::util::open_private_append(path)
         .with_context(|| format!("opening log {}", path.display()))?;
     file.write_all(text.as_bytes())?;
     Ok(())
@@ -228,7 +228,7 @@ fn spawn_and_wait(
         if let Some(parent) = pid_file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(pid_file, format!("{pid}\n"));
+        let _ = crate::util::write_private(pid_file, format!("{pid}\n"));
     }
     let deadline = if spec.timeout_secs == 0 {
         None
@@ -300,10 +300,7 @@ impl CommandRunner for RealRunner {
         )?;
         // One append handle, cloned for both streams: child writes interleave
         // instead of truncating each other, and the file is never rewritten.
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
+        let file = crate::util::open_private_append(log)
             .with_context(|| format!("opening log {}", log.display()))?;
         let stderr_file = file.try_clone()?;
         let output = spawn_and_wait(spec, Stdio::from(file), Stdio::from(stderr_file))?;

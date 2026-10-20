@@ -351,7 +351,7 @@ pub fn save(path: &Path, store: &CheckStore) -> Result<()> {
     to_write.updated_at = crate::util::now_rfc3339();
     let json = serde_json::to_string_pretty(&to_write)?;
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, json)?;
+    crate::util::write_private(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

@@ -261,6 +261,15 @@ pub struct ProjectState {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Set by a human with `mox vps allow <slug>`. Remote deployment is refused
+    /// without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vps_approved_at: Option<String>,
+    #[serde(default)]
+    pub vps_approved_note: String,
+    /// Duration of the last agent run, in seconds.
+    #[serde(default)]
+    pub duration_secs: u64,
 }
 
 impl ProjectState {
@@ -281,6 +290,9 @@ impl ProjectState {
             updated_at: now,
             exit_code: None,
             last_error: None,
+            vps_approved_at: None,
+            vps_approved_note: String::new(),
+            duration_secs: 0,
         }
     }
 }

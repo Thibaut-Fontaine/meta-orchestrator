@@ -27,6 +27,12 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
 6. Human checks (`CHECKS.md`, `mox check`) must never contain tokens, keys or
    personal data. The `CHECKS.md` line format is a public contract with agents:
    keep it backwards compatible and covered by parser tests.
+7. Secrets never appear on a command line. Notification tokens and secret
+   webhook URLs are passed through 0600 curl config files; tests must assert
+   that argv does not contain them.
+8. Agent guard decisions are a tested contract. Any new allow/deny rule needs a
+   positive and a negative test, and must never be bypassable by the wrapper
+   itself (no relative "real" binary, no recursion).
 
 ## Engineering rules
 

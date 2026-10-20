@@ -133,21 +133,44 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
             virtualenvs, datasets, binaries or archives. Caches already point \
             outside the repo via environment variables (`CARGO_TARGET_DIR`, \
             `TMPDIR`, `npm_config_cache`, `PIP_CACHE_DIR`).\n\
-         4. Work in small, focused commits with clear messages. Do not rewrite \
-            shared history and do not force-push.\n\
-         5. Write tests as you go and run them before declaring done. If a test \
-            cannot run in this environment, document why.\n\
+         4. TDD is mandatory, in this order: write a failing unit test for the \
+            next behaviour, run it and confirm it fails for the right reason, \
+            implement the smallest change, run the full test suite plus formatter \
+            and linter, then commit. Never commit untested code; if a test cannot \
+            run here, explain why in `DECISIONS.md`.\n\
+         5. Commit in small focused steps. If you work solo, commit on `main` and \
+            push normally. Only if you spawn sub-agents, work on a branch, open a \
+            PR, and merge after tests pass. Never force-push or rewrite history.\n\
          6. Ask nothing interactively; make a reasonable decision, record it in \
             `DECISIONS.md`, and continue.\n\
-         7. Do not delete unrelated files. Do not run system-wide upgrades, do not \
-            reboot, and do not change SSH/firewall/nginx configuration.\n\
-         8. Whenever the owner must verify something manually (VPS service or \
-            cron, API key/quota, deploy, data sample), append a line to \
-            `CHECKS.md`: `- [ ] <title> | due: +2h | kind: vps | priority: high | \
-            detail: <what to check>`. Use `due` to say when it should be checked. \
-            Never put secrets in it. `mox check` shows these to the owner.\n\
-         9. Finish by writing `STATUS.md` with: what works, what is untested, and \
-            the three most valuable next steps.\n\n\
+         7. Other agents, scripts and OpenCode sessions run in parallel on this \
+            machine and on the VPS. Never signal, kill, restart or modify a \
+            process, service, container, port, cron job or file you did not \
+            create. Never communicate or coordinate with other agents through \
+            shared files, sockets or ports. Use only this project directory and \
+            the provided `TMPDIR`; prefix temporary resources with `{slug}`.\n\
+         8. Do not delete unrelated files. Do not run system-wide upgrades, do not \
+            reboot, and do not change SSH, firewall, nginx, systemd or crontab.\n\
+         9. VPS access is only through mox, never directly. `ssh`, `scp` and \
+            `sftp` are blocked, and a remote step requires a one-time human \
+            approval (`mox vps allow {slug}`). Record what you need in \
+            `CHECKS.md` with the exact command rather than trying to bypass this.\n\
+         10. The PATH contains mox guard wrappers. They block force-push, remote \
+             changes, cloning other repos, `gh repo create/delete/edit`, `gh \
+             api/auth/search`, ssh/scp, and process/service signals. A refusal is \
+             a decision: do not bypass it with an absolute path; add a check.\n\
+         11. Whenever the owner must verify something manually (VPS service or \
+             cron, API key/quota, deploy, data sample), append a line to \
+             `CHECKS.md`: `- [ ] <title> | due: +2h | kind: vps | priority: high | \
+             detail: <what to check>`. Use `due` to say when it should be checked. \
+             Never put secrets in it. `mox check` shows these to the owner.\n\
+         12. You have a wall-clock cap of {cap} seconds. Prefer a small, working, \
+             tested slice over a large unfinished one; commit early and often.\n\
+         13. Finish by writing `STATUS.md` with: what works, what is untested, and \
+             the three most valuable next steps. Commit it (and any `CHECKS.md` or \
+             `DECISIONS.md` changes) as your final commit, then push. `mox` only \
+             counts a run as done when the tree is clean and `origin/main` is up \
+             to date.\n\n\
          ## Working notes\n\
          Environment: project directory is {path}. Use `git status` to see what is \
          already committed. The task specification is also in `TASK.md`.\n\
@@ -168,6 +191,7 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
         acceptance = acceptance,
         agents = crate::util::display_path(&cfg.agents_global_path()),
         path = cfg.projects_root_path().join(&spec.slug).display(),
+        cap = cfg.run_timeout_secs,
         extra = if cfg.extra_instructions.trim().is_empty() {
             String::new()
         } else {
@@ -487,6 +511,14 @@ mod tests {
         assert!(prompt.contains("STATUS.md"));
         assert!(prompt.contains("CHECKS.md"));
         assert!(prompt.contains("due: +2h"));
+        assert!(prompt.contains("TDD is mandatory"));
+        assert!(prompt.contains("wall-clock cap"));
+        assert!(prompt.contains("run in parallel"));
+        assert!(prompt.contains("mox vps allow"));
+        assert!(prompt.contains("mox guard wrappers"));
+        assert!(prompt.contains("sub-agents"));
+        assert!(prompt.contains("7200 seconds"));
+        assert!(prompt.contains("Commit it"));
         assert!(prompt.contains("/tmp/projects/tool"));
         assert!(prompt.contains("AGENTS-GLOBAL.md"));
     }

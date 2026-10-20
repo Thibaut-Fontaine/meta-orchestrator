@@ -346,3 +346,111 @@ fn check_queue_imports_agent_files_and_manages_checks() {
     assert!(status.contains("checks:"), "{status}");
     assert!(status.contains("mox check"), "{status}");
 }
+
+#[test]
+fn guard_blocks_dangerous_agent_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.sh");
+    write_executable(&real, "#!/bin/sh\necho \"REAL $@\"\nexit 0\n");
+
+    let run_guard = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mox"))
+            .arg("__guard")
+            .args(args)
+            .env("MOX_REAL_BIN", &real)
+            .output()
+            .expect("running guard")
+    };
+
+    let allowed = run_guard(&["git", "status"]);
+    assert!(allowed.status.success());
+    assert!(String::from_utf8_lossy(&allowed.stdout).contains("REAL status"));
+
+    for args in [
+        vec!["git", "push", "--force", "origin", "main"],
+        vec!["git", "remote", "add", "evil", "git@github.com:x/y.git"],
+        vec!["gh", "repo", "create", "x", "--public"],
+        vec!["gh", "api", "user"],
+        vec!["ssh", "vps-ovh", "hostname"],
+        vec!["kill", "-9", "1234"],
+        vec!["systemctl", "restart", "nginx"],
+    ] {
+        let output = run_guard(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(126),
+            "expected refusal for {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("mox guard"), "{stderr}");
+    }
+}
+
+#[test]
+fn telegram_notification_keeps_the_token_out_of_argv() {
+    use meta_orchestrator::config::Config;
+
+    let h = harness("PRIVATE");
+    h.run_ok(&["init"]);
+
+    let fake_bin = h.root.join("fakebin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let curl = fake_bin.join("curl");
+    write_executable(
+        &curl,
+        r#"#!/bin/sh
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--config" ]; then
+    cp "$2" "$MOX_TEST_CURL_CONF"
+  fi
+  printf '%s\n' "$1" >> "$MOX_TEST_CURL_ARGV"
+  shift
+done
+echo '{"ok":true}'
+"#,
+    );
+    let conf_copy = h.root.join("curl.conf");
+    let argv_log = h.root.join("curl.argv");
+
+    let cfg = Config {
+        projects_root: h.projects.display().to_string(),
+        state_dir: h.state.display().to_string(),
+        notify_telegram: true,
+        telegram_chat_id: "424242".into(),
+        telegram_token_env: "MOX_TEST_TELEGRAM_TOKEN".into(),
+        ..Config::default()
+    };
+    cfg.write(&h.config, true).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let output = Command::new(env!("CARGO_BIN_EXE_mox"))
+        .args(["notify", "test"])
+        .env("MOX_CONFIG", &h.config)
+        .env("MOX_PROJECTS_ROOT", &h.projects)
+        .env("MOX_STATE_DIR", &h.state)
+        .env("MOX_TEST_TELEGRAM_TOKEN", "secret-token-123")
+        .env("MOX_TEST_CURL_CONF", &conf_copy)
+        .env("MOX_TEST_CURL_ARGV", &argv_log)
+        .env("PATH", format!("{}:{old_path}", fake_bin.display()))
+        .output()
+        .expect("running notify test");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("telegram"));
+
+    let conf = std::fs::read_to_string(&conf_copy).unwrap();
+    assert!(conf.contains("botsecret-token-123"));
+    assert!(conf.contains("chat_id=424242"));
+    let argv = std::fs::read_to_string(&argv_log).unwrap();
+    assert!(!argv.contains("secret-token-123"), "token leaked into argv");
+
+    let status = h.run_ok(&["notify", "status"]);
+    assert!(status.contains("telegram"), "{status}");
+    assert!(
+        !status.contains("secret-token-123"),
+        "token leaked in status"
+    );
+}

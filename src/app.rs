@@ -5,12 +5,14 @@
 use crate::brain::Brain;
 use crate::checks::{self, Check, CheckKind, Priority};
 use crate::clean;
-use crate::cli::{CheckAction, Command, VpsCommand};
+use crate::cli::{CheckAction, Command, NotifyAction, VpsCommand};
 use crate::config::Config;
 use crate::exec::{CommandRunner, CommandSpec};
 use crate::github;
 use crate::ideas;
+use crate::lock::LockGuard;
 use crate::model::{ComputeNeed, Plan, ProjectSpec, ProjectState, ProjectStatus};
+use crate::notify::{self, Event, EventKind, Notifier};
 use crate::prompts;
 use crate::resources::{dir_size_bytes, DfProbe, DiskGuard, DiskProbe, PruneKind};
 use crate::runner::{self, ProjectRun};
@@ -101,6 +103,7 @@ pub struct App {
     pub dry_run: bool,
     pub interactive: bool,
     pub asker: Box<dyn Asker>,
+    pub notifier: Arc<dyn Notifier>,
 }
 
 impl App {
@@ -120,7 +123,13 @@ impl App {
             dry_run,
             interactive,
             asker: Box::new(StdinAsker),
+            notifier: Arc::new(notify::NullNotifier),
         }
+    }
+
+    pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     pub fn with_asker(mut self, asker: Box<dyn Asker>) -> Self {
@@ -151,6 +160,7 @@ impl App {
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
+            Command::Notify { action } => self.cmd_notify(action, out),
             Command::Check {
                 action,
                 json,
@@ -174,9 +184,25 @@ impl App {
             Command::Vps { action } => match action {
                 VpsCommand::Check => self.cmd_vps_check(out),
                 VpsCommand::Suggest { compute } => self.cmd_vps_suggest(&compute, out),
+                VpsCommand::Allow { slug, note } => self.cmd_vps_allow(&slug, &note, out),
+                VpsCommand::Revoke { slug } => self.cmd_vps_revoke(&slug, out),
+                VpsCommand::Approvals => self.cmd_vps_approvals(out),
             },
             Command::Ideas { file } => self.cmd_ideas(&file, out),
+            // Handled in main before any config is loaded.
+            Command::Guard { .. } => unreachable!("guard is dispatched by main"),
         }
+    }
+
+    /// Lock held by `plan`, `up` and `clean --apply` (one at a time).
+    fn up_lock(&self) -> Result<LockGuard> {
+        LockGuard::acquire(&self.cfg.state_dir_path().join("up.lock"))
+    }
+
+    /// Separate lock for the attention queue, so checks can be managed while
+    /// agents are running.
+    fn checks_lock(&self) -> Result<LockGuard> {
+        LockGuard::acquire(&self.cfg.state_dir_path().join("checks.lock"))
     }
 
     fn load_state(&self) -> Result<State> {
@@ -197,15 +223,19 @@ impl App {
     }
 
     fn ensure_layout(&self) -> Result<()> {
+        std::fs::create_dir_all(self.cfg.projects_root_path())
+            .with_context(|| format!("creating {}", self.cfg.projects_root_path().display()))?;
+        // Everything that can contain prompts, logs or state stays private.
         for dir in [
-            self.cfg.projects_root_path(),
             self.cfg.state_dir_path(),
+            self.cfg.internal_dir(),
             self.cfg.logs_dir(),
             self.cfg.run_dir(),
             self.cfg.cache_dir(),
             self.cfg.tmp_dir(),
         ] {
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            crate::util::ensure_dir_private(&dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
         }
         Ok(())
     }
@@ -373,6 +403,7 @@ impl App {
         out: &mut dyn Write,
     ) -> Result<()> {
         self.ensure_layout()?;
+        let _lock = self.up_lock()?;
         let cached = state::load_plan(&self.cfg.plan_file())?;
         let source_name;
 
@@ -438,13 +469,13 @@ impl App {
         };
         state::save_plan(&self.cfg.plan_file(), &plan)?;
 
-        std::fs::write(
-            self.cfg.questions_file(),
+        crate::util::write_private(
+            &self.cfg.questions_file(),
             prompts::render_questions_markdown(&plan.specs),
         )?;
         if !self.cfg.answers_file().exists() {
-            std::fs::write(
-                self.cfg.answers_file(),
+            crate::util::write_private(
+                &self.cfg.answers_file(),
                 prompts::render_answers_template(&plan.specs),
             )?;
         }
@@ -499,6 +530,35 @@ impl App {
             display_path(&self.cfg.questions_file())
         )?;
         writeln!(out, "answers:   {}", display_path(&self.cfg.answers_file()))?;
+        if !self.dry_run {
+            let unanswered: usize = plan.specs.iter().map(|s| s.unanswered().len()).sum();
+            if unanswered > 0 {
+                let mut body = Vec::new();
+                for spec in &plan.specs {
+                    let missing = spec.unanswered().len();
+                    if missing > 0 {
+                        body.push(format!(
+                            "{}: {missing} question(s) — {}",
+                            spec.slug,
+                            crate::util::truncate_chars(&spec.title, 60)
+                        ));
+                    }
+                }
+                body.push(String::new());
+                body.push(format!(
+                    "Answer here: {}",
+                    display_path(&self.cfg.answers_file())
+                ));
+                self.announce(
+                    Event::new(
+                        EventKind::Questions,
+                        format!("{unanswered} question(s) awaiting your answers"),
+                        body.join("\n"),
+                    ),
+                    out,
+                );
+            }
+        }
         writeln!(
             out,
             "next: mox up{}",
@@ -552,6 +612,7 @@ impl App {
         out: &mut dyn Write,
     ) -> Result<()> {
         self.ensure_layout()?;
+        let _lock = self.up_lock()?;
         let mut state = self.load_state()?;
         let plan = self.load_plan()?;
 
@@ -613,6 +674,23 @@ impl App {
             scheduler.usable_cores() / scheduler.max_parallel().max(1)
         )?;
         for spec in &specs {
+            let approved = state
+                .project(&spec.slug)
+                .and_then(|p| p.vps_approved_at.as_deref());
+            if spec.needs_vps && approved.is_none() {
+                writeln!(
+                    out,
+                    "  note: `{}` needs VPS work but is not approved; run \
+                     `mox vps allow {}` once before any remote step.",
+                    spec.slug, spec.slug
+                )?;
+            } else if let Some(when) = approved {
+                writeln!(
+                    out,
+                    "  note: `{}` is approved for VPS work since {when}",
+                    spec.slug
+                )?;
+            }
             if matches!(spec.compute, ComputeNeed::Heavy | ComputeNeed::Gpu) {
                 writeln!(
                     out,
@@ -830,31 +908,97 @@ impl App {
                     .unwrap_or_else(|| ProjectState::new(&outcome.slug, "", ""));
                 project.exit_code = outcome.output.code;
                 project.pid = None;
-                if outcome.success() {
-                    project.status = ProjectStatus::Completed;
-                    project.last_error = None;
-                    writeln!(
-                        out,
-                        "  {}: done in {}s (log: {})",
-                        outcome.slug,
-                        outcome.duration_secs,
-                        display_path(&outcome.log_path)
-                    )?;
+                project.duration_secs = outcome.duration_secs;
+                // A run is only done when its work is committed and pushed.
+                let verification = if outcome.success() {
+                    let dir = self.cfg.projects_root_path().join(&outcome.slug);
+                    Some(crate::verify::verify(self.runner.as_ref(), &self.cfg, &dir))
                 } else {
-                    project.status = ProjectStatus::Failed;
-                    let reason = if outcome.output.timed_out {
-                        format!("timed out after {}s", self.cfg.run_timeout_secs)
-                    } else {
-                        format!("{}: {}", outcome.output.summary(), outcome.output.tail(3))
-                    };
-                    project.last_error = Some(reason.clone());
-                    writeln!(out, "  {}: failed ({reason})", outcome.slug)?;
+                    None
+                };
+                match verification {
+                    Some(verification) if verification.reason().is_none() => {
+                        project.status = ProjectStatus::Completed;
+                        project.last_error = None;
+                        writeln!(
+                            out,
+                            "  {}: done in {}s (log: {})",
+                            outcome.slug,
+                            outcome.duration_secs,
+                            display_path(&outcome.log_path)
+                        )?;
+                        if let Some(note) = &verification.unverified {
+                            writeln!(out, "    note: {note}")?;
+                        }
+                    }
+                    Some(verification) => {
+                        let reason = verification.reason().unwrap_or_default();
+                        project.status = ProjectStatus::Failed;
+                        project.last_error = Some(reason.clone());
+                        writeln!(out, "  {}: failed ({reason})", outcome.slug)?;
+                    }
+                    None => {
+                        project.status = ProjectStatus::Failed;
+                        let reason = if outcome.output.timed_out {
+                            format!("timed out after {}s", self.cfg.run_timeout_secs)
+                        } else {
+                            format!("{}: {}", outcome.output.summary(), outcome.output.tail(3))
+                        };
+                        project.last_error = Some(reason.clone());
+                        writeln!(out, "  {}: failed ({reason})", outcome.slug)?;
+                    }
                 }
                 state.upsert(project);
             }
             self.save_state(&state)?;
         }
 
+        if !self.dry_run {
+            let mut lines = Vec::new();
+            let mut completed = 0usize;
+            let mut failed = 0usize;
+            for spec in &specs {
+                let Some(project) = state.project(&spec.slug) else {
+                    continue;
+                };
+                if project.status == ProjectStatus::Completed {
+                    completed += 1;
+                }
+                if project.status == ProjectStatus::Failed {
+                    failed += 1;
+                }
+                lines.push(format!(
+                    "{}: {} ({}s){}",
+                    spec.slug,
+                    project.status.as_str(),
+                    project.duration_secs,
+                    project
+                        .last_error
+                        .as_deref()
+                        .map(|e| format!(" — {e}"))
+                        .unwrap_or_default()
+                ));
+            }
+            if let Ok(store) = checks::load(&self.cfg.checks_file()) {
+                let open = store.open().len();
+                if open > 0 {
+                    lines.push(format!("{} open human check(s) — run `mox check`", open));
+                }
+            }
+            let kind = if failed > 0 {
+                EventKind::Failed
+            } else {
+                EventKind::Finished
+            };
+            self.announce(
+                Event::new(
+                    kind,
+                    format!("{completed} completed, {failed} failed"),
+                    lines.join("\n"),
+                ),
+                out,
+            );
+        }
         if self.dry_run {
             writeln!(
                 out,
@@ -926,8 +1070,8 @@ impl App {
         }
         writeln!(
             out,
-            "{:<28} {:<11} {:<8} {:<7} {:>9}  repo",
-            "slug", "status", "compute", "cores", "size"
+            "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7}  repo",
+            "slug", "status", "compute", "cores", "size", "time"
         )?;
         for project in state.ordered() {
             let dir = PathBuf::from(&project.path);
@@ -957,15 +1101,22 @@ impl App {
                 .unwrap_or_default();
             writeln!(
                 out,
-                "{:<28} {:<11} {:<8} {:<7} {:>9}  {}{}",
+                "{:<28} {:<11} {:<8} {:<7} {:>9} {:>7}  {}{}",
                 project.slug,
                 format!("{}{}", project.status.as_str(), running),
                 project.compute.as_str(),
                 cores,
                 size,
+                if project.duration_secs > 0 {
+                    format!("{}s", project.duration_secs)
+                } else {
+                    "-".to_string()
+                },
                 truncate_chars(&project.repo_url, 44),
                 if project.last_error.is_some() {
                     " !"
+                } else if project.vps_approved_at.is_some() {
+                    " [vps-ok]"
                 } else {
                     ""
                 }
@@ -1025,6 +1176,12 @@ impl App {
         force: bool,
         out: &mut dyn Write,
     ) -> Result<()> {
+        self.ensure_layout()?;
+        let _lock = if apply && !self.dry_run {
+            Some(self.up_lock()?)
+        } else {
+            None
+        };
         let report = clean::scan(&self.cfg);
         if report.project_entries.is_empty() && report.internal_entries.is_empty() {
             writeln!(out, "nothing to clean")?;
@@ -1125,19 +1282,85 @@ impl App {
         Ok(())
     }
 
+    fn announce(&self, event: Event, out: &mut dyn Write) {
+        if let Err(err) = self.notifier.send(&event) {
+            let _ = writeln!(out, "warning: notification failed: {err:#}");
+        }
+    }
+
+    fn cmd_notify(&mut self, action: NotifyAction, out: &mut dyn Write) -> Result<()> {
+        match action {
+            NotifyAction::Status => {
+                let names = notify::channel_names(self.notifier.as_ref());
+                writeln!(out, "notification channels: {names}")?;
+                if names == "none" {
+                    writeln!(
+                        out,
+                        "\nEnable one in {}:\n\
+                         notify_telegram = true\n\
+                         telegram_chat_id = \"123456789\"\n\
+                         # export MOX_TELEGRAM_TOKEN=...   (token from @BotFather)\n\
+                         # or notify_desktop = true (uses notify-send)\n\
+                         # or notify_webhook = true + webhook_url = \"https://...\"",
+                        display_path(&self.cfg_path)
+                    )?;
+                }
+            }
+            NotifyAction::Test => {
+                let names = notify::channel_names(self.notifier.as_ref());
+                if names == "none" {
+                    bail!("no notification channel configured; run `mox notify status` for setup");
+                }
+                self.notifier
+                    .send(&notify::test_event())
+                    .context("sending the test notification")?;
+                writeln!(out, "test notification sent via {names}")?;
+            }
+        }
+        Ok(())
+    }
+
     fn cmd_check(
         &mut self,
         action: Option<CheckAction>,
         opts: CheckOptions,
         out: &mut dyn Write,
     ) -> Result<()> {
+        self.ensure_layout()?;
+        let lock = self.checks_lock()?;
         let now = Utc::now();
         let mut store = checks::load(&self.cfg.checks_file())?;
+        let mut imported_created = 0usize;
         if !opts.no_sync {
             let imported = checks::sync_projects(&mut store, &self.cfg.projects_root_path(), now)?;
+            imported_created = imported.created;
             if imported.total() > 0 {
                 checks::save(&self.cfg.checks_file(), &store)?;
             }
+        }
+        if imported_created > 0 && !opts.watch {
+            let items = checks::ordered_open(&store, now);
+            let lines: Vec<String> = items
+                .iter()
+                .take(3)
+                .map(|(check, _)| {
+                    format!(
+                        "{}: {} ({}, {})",
+                        check.slug,
+                        check.title,
+                        checks::relative_label(check, now),
+                        check.priority.as_str()
+                    )
+                })
+                .collect();
+            self.announce(
+                Event::new(
+                    EventKind::Checks,
+                    format!("{imported_created} new human check(s)"),
+                    lines.join("\n"),
+                ),
+                out,
+            );
         }
 
         match action {
@@ -1215,7 +1438,50 @@ impl App {
                     store.open().len()
                 )?;
             }
+            Some(CheckAction::Notify) => {
+                if notify::channel_names(self.notifier.as_ref()) == "none" {
+                    bail!("no notification channel configured; run `mox notify status` for setup");
+                }
+                let items = checks::ordered_open(&store, now);
+                let mut overdue = 0usize;
+                let mut now_count = 0usize;
+                let mut lines = Vec::new();
+                for (check, bucket) in items.iter().take(8) {
+                    if *bucket == checks::Bucket::Overdue {
+                        overdue += 1;
+                    }
+                    if *bucket == checks::Bucket::Now {
+                        now_count += 1;
+                    }
+                    lines.push(format!(
+                        "{}: {} ({}, {})",
+                        check.slug,
+                        check.title,
+                        checks::relative_label(check, now),
+                        check.priority.as_str()
+                    ));
+                }
+                if overdue + now_count == 0 {
+                    writeln!(
+                        out,
+                        "nothing is overdue or due now; no reminder sent ({} open check(s))",
+                        store.open().len()
+                    )?;
+                    return Ok(());
+                }
+                let title = format!("{overdue} overdue, {now_count} due now");
+                self.notifier
+                    .send(&Event::new(EventKind::Digest, title, lines.join("\n")))
+                    .context("sending the check reminder")?;
+                writeln!(
+                    out,
+                    "reminder sent via {} ({} open check(s))",
+                    notify::channel_names(self.notifier.as_ref()),
+                    store.open().len()
+                )?;
+            }
             None => {
+                drop(lock);
                 if opts.watch {
                     return self.watch_checks(opts.interval, out);
                 }
@@ -1282,6 +1548,92 @@ impl App {
                     .join(", ")
             ),
         }
+    }
+
+    /// One-time human approval for remote deployment of one project.
+    fn cmd_vps_allow(&mut self, slug: &str, note: &str, out: &mut dyn Write) -> Result<()> {
+        self.ensure_layout()?;
+        let mut state = self.load_state()?;
+        let Some(mut project) = state.project(slug).cloned() else {
+            bail!(
+                "unknown project `{slug}`; known: {}",
+                state
+                    .projects
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        if self.dry_run {
+            writeln!(out, "[dry-run] would allow VPS deployment for `{slug}`")?;
+            return Ok(());
+        }
+        project.vps_approved_at = Some(now_rfc3339());
+        project.vps_approved_note = note.trim().to_string();
+        project.updated_at = now_rfc3339();
+        state.upsert(project);
+        self.save_state(&state)?;
+        writeln!(
+            out,
+            "VPS deployment APPROVED for `{slug}` at {}.\n\
+             This is persistent; revoke with `mox vps revoke {slug}`.\n\
+             Reminder: agents still cannot ssh — remote work is executed by mox.",
+            state
+                .project(slug)
+                .and_then(|p| p.vps_approved_at.clone())
+                .unwrap_or_default()
+        )?;
+        if !note.trim().is_empty() {
+            writeln!(out, "note: {}", note.trim())?;
+        }
+        Ok(())
+    }
+
+    fn cmd_vps_revoke(&mut self, slug: &str, out: &mut dyn Write) -> Result<()> {
+        self.ensure_layout()?;
+        let mut state = self.load_state()?;
+        let Some(mut project) = state.project(slug).cloned() else {
+            bail!("unknown project `{slug}`");
+        };
+        if project.vps_approved_at.is_none() {
+            writeln!(out, "`{slug}` had no VPS approval")?;
+            return Ok(());
+        }
+        if self.dry_run {
+            writeln!(out, "[dry-run] would revoke VPS deployment for `{slug}`")?;
+            return Ok(());
+        }
+        project.vps_approved_at = None;
+        project.vps_approved_note = String::new();
+        project.updated_at = now_rfc3339();
+        state.upsert(project);
+        self.save_state(&state)?;
+        writeln!(out, "VPS deployment approval revoked for `{slug}`")?;
+        Ok(())
+    }
+
+    fn cmd_vps_approvals(&mut self, out: &mut dyn Write) -> Result<()> {
+        let state = self.load_state()?;
+        let approved: Vec<&ProjectState> = state
+            .ordered()
+            .into_iter()
+            .filter(|p| p.vps_approved_at.is_some())
+            .collect();
+        if approved.is_empty() {
+            writeln!(out, "no project is approved for VPS deployment")?;
+            return Ok(());
+        }
+        for project in approved {
+            writeln!(
+                out,
+                "{:<28} approved {}  {}",
+                project.slug,
+                project.vps_approved_at.as_deref().unwrap_or(""),
+                project.vps_approved_note
+            )?;
+        }
+        Ok(())
     }
 
     fn cmd_vps_check(&mut self, out: &mut dyn Write) -> Result<()> {
@@ -1567,6 +1919,106 @@ mod tests {
     }
 
     #[test]
+    fn up_marks_dirty_work_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.cfg.taskset_bin = String::new();
+        app.cfg.nice_bin = String::new();
+        app.cfg.ionice_bin = String::new();
+        app.runner = Arc::new(FakeRunner::new(|spec| {
+            if spec.program == "df" {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "x\n/dev/x 1 1 50000 1% /\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            if spec.program == "git" && spec.args.contains(&"status".to_string()) {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: " M src/main.rs\n?? notes.txt\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            if spec.program == "git" && spec.args.contains(&"@{u}".to_string()) {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "origin/main\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            if spec.program == "git" && spec.args.contains(&"rev-list".to_string()) {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "0\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            crate::exec::Output::ok()
+        }));
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], None, true, false, false, &mut out)
+            .unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        let project = state.project("demo").unwrap();
+        assert_eq!(project.status, ProjectStatus::Failed);
+        assert!(
+            project
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("2 uncommitted"),
+            "{:?}",
+            project.last_error
+        );
+    }
+
+    #[test]
+    fn up_marks_a_timed_out_run_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.cfg.taskset_bin = String::new();
+        app.cfg.nice_bin = String::new();
+        app.cfg.ionice_bin = String::new();
+        app.cfg.run_timeout_secs = 42;
+        app.runner = Arc::new(FakeRunner::new(|spec| {
+            if spec.program == "df" {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "x\n/dev/x 1 1 50000 1% /\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            if spec.program == "opencode" {
+                return crate::exec::Output {
+                    code: Some(124),
+                    timed_out: true,
+                    ..crate::exec::Output::default()
+                };
+            }
+            crate::exec::Output::ok()
+        }));
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], None, true, false, false, &mut out)
+            .unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        let project = state.project("demo").unwrap();
+        assert_eq!(project.status, ProjectStatus::Failed);
+        assert_eq!(project.exit_code, Some(124));
+        assert!(
+            project
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 42s"),
+            "{:?}",
+            project.last_error
+        );
+    }
+
+    #[test]
     fn up_skips_github_when_asked() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = temp_app(dir.path());
@@ -1576,8 +2028,15 @@ mod tests {
             .unwrap();
         let state = state::load(&app.cfg.state_file()).unwrap();
         assert_eq!(state.projects["demo"].repo_url, "");
+        let gh_calls: Vec<_> = app
+            .runner
+            .recorded_calls()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.program == app.cfg.gh_bin)
+            .collect();
+        assert!(gh_calls.is_empty(), "no GitHub call expected: {gh_calls:?}");
         let displays = app.runner_displays();
-        assert!(!displays.iter().any(|d| d.contains("repo create")));
         assert!(displays.iter().any(|d| d.contains("opencode run")));
     }
 
@@ -1691,6 +2150,79 @@ mod tests {
                 .to_string(),
         ));
         app.save_state(&state).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_layout_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        for path in [
+            app.cfg.state_dir_path(),
+            app.cfg.internal_dir(),
+            app.cfg.logs_dir(),
+            app.cfg.run_dir(),
+            app.cfg.cache_dir(),
+            app.cfg.tmp_dir(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} must be 0700",
+                path.display()
+            );
+        }
+
+        write_plan(&app, vec![spec("demo")]);
+        assert_eq!(
+            std::fs::metadata(app.cfg.plan_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        app.save_state(&State::default()).unwrap();
+        assert_eq!(
+            std::fs::metadata(app.cfg.state_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let mut store = checks::CheckStore::default();
+        store.add(Check::new(
+            "demo",
+            "x",
+            CheckKind::Manual,
+            Priority::Normal,
+            None,
+            "",
+            Utc::now(),
+        ));
+        checks::save(&app.cfg.checks_file(), &store).unwrap();
+        assert_eq!(
+            std::fs::metadata(app.cfg.checks_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        app.cmd_up(vec![], None, true, false, false, &mut Vec::new())
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(app.cfg.logs_dir().join("demo.log"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -1859,6 +2391,200 @@ mod tests {
     }
 
     #[test]
+    fn plan_notifies_about_open_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        app.brain = Arc::new(ScriptedBrain::new(vec![
+            r#"{"projects":[{"slug":"expense","title":"Expense","questions":[
+                {"id":"q1","question":"Which DB?","default":"SQLite"}]}]}"#
+                .to_string(),
+        ]));
+        let ideas = dir.path().join("ideas.txt");
+        std::fs::write(&ideas, "- Expense\n").unwrap();
+        let mut out = Vec::new();
+        app.cmd_plan(Some(ideas), None, false, true, false, &mut out)
+            .unwrap();
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::Questions);
+        assert!(events[0].title.contains("1 question"));
+        assert!(events[0].body.contains("expense"));
+    }
+
+    #[test]
+    fn up_notifies_a_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], None, true, false, false, &mut out)
+            .unwrap();
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::Finished);
+        assert!(events[0].title.contains("1 completed"));
+        assert!(events[0].body.contains("demo: completed"));
+    }
+
+    #[test]
+    fn up_notifies_failures_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        app.runner = Arc::new(FakeRunner::new(|spec| {
+            if spec.program == "df" {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "x\n/dev/x 1 1 50000 1% /\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            if spec.program == "gh" && spec.args.contains(&"create".to_string()) {
+                return crate::exec::Output::failure(1, "Name already exists");
+            }
+            crate::exec::Output::ok()
+        }));
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], None, false, false, false, &mut out)
+            .unwrap();
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::Failed);
+        assert!(events[0].title.contains("1 failed"));
+    }
+
+    #[test]
+    fn check_sync_notifies_new_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let project = app.cfg.projects_root_path().join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("CHECKS.md"),
+            "- [ ] Verify cron | due: +1h | kind: vps | priority: high\n",
+        )
+        .unwrap();
+        let (_, result) = call_check(&mut app, None, false, false, false, false);
+        result.unwrap();
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::Checks);
+        assert!(events[0].body.contains("Verify cron"));
+    }
+
+    #[test]
+    fn notify_status_and_test_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let mut out = Vec::new();
+        app.cmd_notify(NotifyAction::Status, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("none"));
+        let err = app
+            .cmd_notify(NotifyAction::Test, &mut Vec::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("no notification channel"));
+
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        app.ensure_layout().unwrap();
+        let mut out = Vec::new();
+        app.cmd_notify(NotifyAction::Test, &mut out).unwrap();
+        assert_eq!(rec.events()[0].kind, EventKind::Test);
+        assert!(String::from_utf8(out).unwrap().contains("recording"));
+    }
+
+    #[test]
+    fn check_notify_sends_a_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec.clone());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let mut store = checks::CheckStore::default();
+        store.add(Check::new(
+            "demo",
+            "Check the VPS cron",
+            CheckKind::Vps,
+            Priority::High,
+            Some(Utc::now() - chrono::Duration::minutes(5)),
+            "",
+            Utc::now(),
+        ));
+        checks::save(&app.cfg.checks_file(), &store).unwrap();
+        let (out, result) = call_check(
+            &mut app,
+            Some(CheckAction::Notify),
+            false,
+            false,
+            false,
+            true,
+        );
+        result.unwrap();
+        assert!(out.contains("reminder sent"), "{out}");
+        let events = rec.events();
+        assert_eq!(events[0].kind, EventKind::Digest);
+        assert!(events[0].title.contains("overdue"));
+        assert!(events[0].body.contains("Check the VPS cron"));
+    }
+
+    #[test]
+    fn vps_approval_is_one_time_and_persistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+
+        let mut out = Vec::new();
+        app.cmd_vps_allow("nope", "", &mut out).unwrap_err();
+        app.cmd_vps_allow("demo", "deploy the fetcher", &mut out)
+            .unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        let project = state.project("demo").unwrap();
+        assert!(project.vps_approved_at.is_some());
+        assert_eq!(project.vps_approved_note, "deploy the fetcher");
+
+        let mut out = Vec::new();
+        app.cmd_vps_approvals(&mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("demo"));
+
+        let mut status = Vec::new();
+        app.cmd_status(false, &mut status).unwrap();
+        assert!(String::from_utf8(status).unwrap().contains("[vps-ok]"));
+
+        let mut out = Vec::new();
+        app.cmd_vps_revoke("demo", &mut out).unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        assert!(state.project("demo").unwrap().vps_approved_at.is_none());
+    }
+
+    #[test]
+    fn up_warns_when_a_vps_project_is_not_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let mut spec = spec("demo");
+        spec.needs_vps = true;
+        write_plan(&app, vec![spec]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], None, true, true, false, &mut out)
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("needs VPS work but is not approved"),
+            "{text}"
+        );
+        assert!(text.contains("mox vps allow demo"), "{text}");
+    }
+
+    #[test]
     fn up_imports_checks_written_in_project() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = temp_app(dir.path());
@@ -1879,6 +2605,34 @@ mod tests {
         let store = checks::load(&app.cfg.checks_file()).unwrap();
         assert_eq!(store.open().len(), 1);
         assert_eq!(store.checks[0].title, "Verify VPS service");
+    }
+
+    #[test]
+    fn up_refuses_to_run_while_locked_but_checks_still_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        write_plan(&app, vec![spec("demo")]);
+
+        let held = app.up_lock().unwrap();
+        let mut out = Vec::new();
+        let err = app
+            .cmd_up(vec![], None, true, true, false, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("another mox is running"), "{err}");
+
+        // The attention queue uses its own lock and stays usable.
+        let (out, result) = call_check(&mut app, None, false, false, false, false);
+        assert!(result.is_ok());
+        assert!(
+            out.contains("nothing to check") || out.contains("CHECKS"),
+            "{out}"
+        );
+        drop(held);
+        app.cmd_up(vec![], None, true, true, false, &mut Vec::new())
+            .unwrap();
     }
 
     #[test]

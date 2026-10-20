@@ -1,7 +1,20 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.1.0** · 151 unit tests + 5 end-to-end tests · private repo,
+Status: **v0.2.0** · 199 unit tests + 7 end-to-end tests · private repo,
 `main` pushed.
+
+## Decisions locked in (2026-10-20)
+
+| Question | Decision | Implemented |
+|---|---|---|
+| VPS access from agents | Only through `mox`; direct `ssh`/`scp` is refused by guard wrappers | ✅ |
+| Git workflow | Solo agent pushes `main`; an agent that spawns sub-agents uses a branch + PR | ✅ prompt + `AGENTS.md` |
+| Development method | TDD, mandatory order: failing test → code → tests/fmt/lint → commit | ✅ prompt + `AGENTS.md` |
+| VPS deployment | Explicit target, gated by a **one-time human approval** (`mox vps allow <slug>`) | ✅ ledger, remote execution in M4 |
+| Parallel awareness | Every agent is told other agents/scripts run locally and on the VPS; never interfere or communicate | ✅ prompt + `AGENTS.md` |
+| Wall-clock cap | Per-run cap, default 7200 s, `--run-timeout` override, duration recorded | ✅ |
+| Notifications | Telegram bot + optional desktop/webhook; token only via env + 0600 curl config | ✅ |
+| Reminder delivery | `mox check notify` one-shot digest, suitable for a systemd **user** timer | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
 ordered by risk first, then by the original product vision.
@@ -101,21 +114,21 @@ before signalling, VPS access is read-only.
 Sizes are rough solo-with-agent estimates. Every behaviour change ships with
 unit tests and, when it touches the workflow, an end-to-end test (project rule).
 
-### M0 — v0.1.1 “Harden” (1–2 days)
+### M0 — v0.1.1 “Harden” (done in v0.2.0)
 
 Goal: make the current tool safe to leave unattended.
 
-- [ ] Exclusive lock (`flock` on `state_dir/mox.lock`); `up`, `clean`, `plan`,
-      `check` mutations refuse to run concurrently. *(P0, S)*
-- [ ] `0700` directories and `0600` files for `.mox/`, logs, prompts, pid files,
+- [x] Exclusive lock (`up.lock`) for `plan`/`up`/`clean --apply`, separate
+      `checks.lock`, stale-owner reclaim. *(P0, S)*
+- [x] `0700` directories and `0600` files for `.mox/`, logs, prompts, pid files,
       `state.json`, `checks.json`, `plan.json`, `answers.toml`. *(P0, S)*
-- [ ] Redact obvious secrets in logs? **No** — instead: document that logs are
-      private and keep the model from printing env. Add a `--redact` post-filter
-      as a best-effort later. *(P0, S)*
-- [ ] Record and verify post-run state: dirty tree, unpushed commits, remote
-      HEAD == local HEAD; mark `failed` with a precise reason. *(P0, M)*
-- [ ] `mox status` displays interrupted `running` entries as stale and suggests
-      `mox stop`/`mox up --resume`. *(P0, S)*
+- [x] Logs/prompts are private; no redaction of model output (documented risk).
+      *(P0, S)*
+- [x] Post-run verification: dirty tree and commits ahead of the upstream /
+      `origin/main` mark the project `failed`. Missing upstream is reported as
+      unverified, not failed. *(P0, M)*
+- [ ] `mox status` explicitly flags interrupted `running` entries as stale and
+      suggests `mox stop`/`mox up --resume`. *(P0, S)*
 - [ ] Clean shutdown on Ctrl-C: kill the process group, clear pid files, save a
       final status. *(P0, M)*
 - [ ] Tests: lock contention, permissions, push verification, stale runs.
@@ -123,7 +136,7 @@ Goal: make the current tool safe to leave unattended.
 Exit criteria: two concurrent `mox up` cannot corrupt state; logs are 0600; a
 run that did not push is reported as failed.
 
-### M1 — v0.2 “Guardrails” (3–5 days)
+### M1 — v0.2 “Guardrails” (partly done in v0.2.0)
 
 Goal: turn prompt rules into enforceable boundaries.
 
@@ -142,7 +155,8 @@ Goal: turn prompt rules into enforceable boundaries.
       obvious secret patterns; test with fixtures. *(P1, M)*
 - [ ] `mox doctor` verifies the guards are active and reports their paths.
       *(P1, S)*
-- [ ] Threat-model section in README: what an agent can and cannot do.
+- [x] Threat-model section in README: wrappers are defence in depth, not a
+      kernel sandbox; absolute paths can still bypass them. *(P1, S)*
 
 Exit criteria: a malicious prompt cannot create a public repo, force-push, or
 run `ssh vps-ovh` through the wrappers; oversized/secret files are blocked at
@@ -158,6 +172,8 @@ Goal: stop wasting tokens and wall-clock time; make projects manageable.
       attempt counter and exponential backoff. *(P0, M)*
 - [ ] Core weighting by `compute` (`preferred_cores`), with a minimum of one
       core and a configurable cap. *(P0, S)*
+- [x] Wall-clock cap per run, configurable with `--run-timeout`, duration
+      recorded and shown in `status`. *(P1, S)*
 - [ ] Post-answers **second brain pass**: synthesize final summary, acceptance
       criteria, risks and a `TASKS.md` checklist from questions + answers.
       `mox plan --refresh` re-runs it; `mox spec show --slug` prints it.
@@ -174,7 +190,7 @@ Goal: stop wasting tokens and wall-clock time; make projects manageable.
 Exit criteria: finishing one project immediately starts the next; `--resume`
 launches only unfinished work; heavy projects get more cores.
 
-### M3 — v0.4 “Checks 2.0 & reminders” (3–4 days)
+### M3 — v0.4 “Checks 2.0 & reminders” (partly done in v0.2.0)
 
 Goal: the attention queue becomes proactive.
 
@@ -185,9 +201,12 @@ Goal: the attention queue becomes proactive.
 - [ ] `mox check remove|reopen|export --format md|ics|json`. *(P1, M)*
 - [ ] `mox check --top 3` and top-3 NOW items printed at the end of `mox up`.
       *(P1, S)*
-- [ ] Optional desktop notifications: `notify-send` on overdue NOW items, plus a
-      `mox check daemon --interval 5m` mode; provide a systemd **user** timer
-      example (no system-wide changes). *(P1, M)*
+- [x] Notifications: Telegram bot (token via env, never argv), desktop
+      (`notify-send`) and JSON webhook; `mox notify status|test`.
+      *(P1, M)*
+- [x] `mox check notify` one-shot digest + systemd **user** timer example.
+      *(P1, S)*
+- [ ] `mox check daemon --interval 5m` for unattended reminders. *(P2, S)*
 - [ ] **VPS probes in checks**: `probe: systemctl is-active fetcher` /
       `probe: disk_free > 5G` / `probe: http 200 https://…` (read-only). A failed
       probe moves the check to OVERDUE with the observed value. *(P1, L)*
@@ -197,12 +216,15 @@ Goal: the attention queue becomes proactive.
 Exit criteria: a check can remind me tomorrow without me opening the terminal;
 a broken VPS cron surfaces as OVERDUE with evidence.
 
-### M4 — v0.5 “Execution targets” (5–8 days)
+### M4 — v0.5 “Execution targets” (5–8 days; approval ledger already done)
 
 Goal: actually use the VPS and remote plans, not just recommend them.
 
+- [x] One-time human approval per project (`mox vps allow/revoke/approvals`),
+      stored in state and shown by `mox status`; agents cannot grant it.
+      *(P1, S)*
 - [ ] Persist `execution_target` per project (`local`, `vps`, `remote:<alias>`)
-      and honour it in `up`. *(P1, M)*
+      and honour it in `up`; refuse `vps` without approval. *(P1, M)*
 - [ ] Capacity-aware placement: `mox up --target auto` chooses local/VPS per
       project using cores, `MemAvailable`, disk and current load. *(P1, M)*
 - [ ] Remote bootstrap (read-only steps first, then opt-in write): verify
@@ -263,23 +285,23 @@ can be reviewed from `mox report`.
 
 ---
 
-## 5. Suggested next sprint (v0.1.1 + start of v0.2)
+## 5. Suggested next sprint
 
-Ship in this order, one commit per item:
+Already shipped in v0.2.0: locks, private permissions, post-run verification,
+`gh`/`ssh`/signal wrappers, one-time VPS approval, wall-clock cap, Telegram
+notifications, TDD/parallel/VPS rules in every prompt.
 
-1. `flock` lock + stale-run detection.
-2. `0700`/`0600` permissions on runtime files.
-3. Post-run verification (dirty tree, unpushed commits, remote HEAD).
-4. Ctrl-C cleanup and process-group kill.
-5. Restricted `gh` wrapper + tests (first guardrail).
-6. Generated OpenCode permission config (edits confined to the project).
-7. `compute`-weighted core allocation.
-8. `mox up --resume` / `--retry-failed`.
+Next, in this order:
 
-After that, pick either **M1 guardrails** (if unattended trust matters most) or
-**M2 rolling queue + resume** (if throughput matters most). Recommended:
-guardrails first — an autonomous agent with full `gh` and `ssh` access is the
-largest remaining risk.
+1. **Ctrl-C cleanup + process-group kill** (finish M0).
+2. **OpenCode permission config** generated per project (finish M1).
+3. **Pre-commit hook** for large files and secrets (finish M1).
+4. **`mox up --resume` / `--retry-failed`** (M2).
+5. **Rolling worker pool** instead of batch barriers (M2).
+6. **Compute-weighted cores** (M2).
+7. **`mox status --verbose`** with `STATUS.md` + stale-run flags (M2).
+8. **VPS execution** (`--target vps`, rsync/ssh run, fetch back) (M4) — the
+   largest remaining feature and the one that unlocks the original vision.
 
 ---
 

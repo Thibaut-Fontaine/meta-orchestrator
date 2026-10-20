@@ -98,7 +98,7 @@ pub fn save(path: &Path, state: &State) -> Result<()> {
     to_write.updated_at = crate::util::now_rfc3339();
     let json = serde_json::to_string_pretty(&to_write)?;
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
+    crate::util::write_private(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
 }
@@ -122,7 +122,7 @@ pub fn save_plan(path: &Path, plan: &Plan) -> Result<()> {
     }
     let json = serde_json::to_string_pretty(plan)?;
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, json)?;
+    crate::util::write_private(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

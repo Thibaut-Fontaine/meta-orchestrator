@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub dry_run: bool,
 
+    /// Wall-clock cap for one agent run, in seconds (default: config value).
+    #[arg(long, global = true, value_name = "SECS")]
+    pub run_timeout: Option<u64>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -170,6 +174,12 @@ pub enum Command {
         no_sync: bool,
     },
 
+    /// Send or inspect notifications (Telegram, desktop, webhook).
+    Notify {
+        #[command(subcommand)]
+        action: NotifyAction,
+    },
+
     /// Inspect the VPS or get an execution-target recommendation.
     Vps {
         #[command(subcommand)]
@@ -181,6 +191,24 @@ pub enum Command {
         /// Ideas file (`-` for stdin).
         file: PathBuf,
     },
+
+    /// Internal: enforce agent guardrails, then exec the real program.
+    #[command(name = "__guard", hide = true)]
+    Guard {
+        /// Wrapped program name (git, gh, ssh, ...).
+        program: String,
+        /// Original arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotifyAction {
+    /// Send a test message through every configured channel.
+    Test,
+    /// Show which channels are configured (never prints secrets).
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -231,6 +259,9 @@ pub enum CheckAction {
 
     /// Import every project's CHECKS.md into the queue.
     Sync,
+
+    /// Send a reminder digest of due checks through the configured channels.
+    Notify,
 }
 
 #[derive(Debug, Subcommand)]
@@ -243,6 +274,21 @@ pub enum VpsCommand {
         #[arg(long, default_value = "medium")]
         compute: String,
     },
+    /// Grant one project permission to deploy to the VPS (one-time human action).
+    Allow {
+        /// Project slug.
+        slug: String,
+        /// Why it is allowed / what it may do.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Revoke a VPS deployment approval.
+    Revoke {
+        /// Project slug.
+        slug: String,
+    },
+    /// List projects with a VPS approval.
+    Approvals,
 }
 
 #[cfg(test)]
@@ -264,6 +310,7 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.dry_run);
+        assert_eq!(cli.run_timeout, None);
         match cli.command {
             Command::Plan {
                 ideas,
@@ -319,6 +366,17 @@ mod tests {
                 ..
             }
         ));
+        let cli =
+            Cli::try_parse_from(["mox", "vps", "allow", "demo", "--note", "deploy ok"]).unwrap();
+        match cli.command {
+            Command::Vps {
+                action: VpsCommand::Allow { slug, note },
+            } => {
+                assert_eq!(slug, "demo");
+                assert_eq!(note, "deploy ok");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         let cli = Cli::try_parse_from(["mox", "vps", "suggest", "--compute", "heavy"]).unwrap();
         match cli.command {
             Command::Vps {
@@ -326,6 +384,12 @@ mod tests {
             } => assert_eq!(compute, "heavy"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_global_run_timeout() {
+        let cli = Cli::try_parse_from(["mox", "up", "--run-timeout", "1800"]).unwrap();
+        assert_eq!(cli.run_timeout, Some(1800));
     }
 
     #[test]
@@ -387,6 +451,38 @@ mod tests {
         ));
         let cli = Cli::try_parse_from(["mox", "attention"]).unwrap();
         assert!(matches!(cli.command, Command::Check { .. }));
+    }
+
+    #[test]
+    fn parses_notify_commands() {
+        let cli = Cli::try_parse_from(["mox", "notify", "test"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Notify {
+                action: NotifyAction::Test
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "check", "notify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Check {
+                action: Some(CheckAction::Notify),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_hidden_guard_command() {
+        let cli =
+            Cli::try_parse_from(["mox", "__guard", "git", "push", "--force", "origin"]).unwrap();
+        match cli.command {
+            Command::Guard { program, args } => {
+                assert_eq!(program, "git");
+                assert_eq!(args, vec!["push", "--force", "origin"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
