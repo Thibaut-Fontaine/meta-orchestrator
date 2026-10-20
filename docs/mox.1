@@ -1,0 +1,60 @@
+.TH MOX 1 "2026-10-20" "mox 0.8.0" "User Commands"
+.SH NAME
+mox \- parallel OpenCode project orchestrator
+.SH SYNOPSIS
+.B mox
+[--config FILE] [--dry-run] [--run-timeout SECS] COMMAND [ARGS]
+.SH DESCRIPTION
+mox turns project ideas into private repositories worked on by isolated
+OpenCode agents, and tracks milestones, ETA, human checks and costs of waiting.
+.SH COMMANDS
+.TP
+.B init [--profile minimal|standard|paranoid]
+Write the config and create the projects/cache tree.
+.TP
+.B plan --ideas FILE [--answers FILE] [--yes]
+Ask the planning model for questions and a milestone plan.
+.TP
+.B up [--target local|vps|auto] [--detach] [--resume] [--retry-failed]
+Scaffold, create private repositories and run agents.
+.TP
+.B status [--watch] [--verbose] [--json]
+Show lifecycle, milestone progress, ETA, disk and repo.
+.TP
+.B milestone start|done|block|todo|list|status [ID]
+Update the progress board in the current project.
+.TP
+.B check [--watch] [--context] [--top N]
+Human attention queue; add/done/later/remove/reopen/probe/export/daemon.
+.TP
+.B vps check|suggest|setup|allow|revoke|approvals|sync|ps|cleanup|plan
+Read-only VPS checks, approvals, detached sync and ghost audit.
+.TP
+.B bot [--once]
+Read-only Telegram bot (never run on the VPS unless explicitly allowed).
+.TP
+.B stats [--json] [--reset --yes]
+Cross-project milestone timing calibration.
+.TP
+.B report [--out FILE]
+Markdown report across projects.
+.SH FILES
+.I ~/.config/meta-orchestrator/config.toml
+.RI (0600),
+.I ~/.local/state/meta-orchestrator/
+state, plan, checks, stats, events, answers,
+.I ~/mox-projects/<slug>/MILESTONES.json
+and the private
+.I .mox/
+tree.
+.SH SAFETY
+Repositories are always private. Agents get an OpenCode permission config and
+PATH wrappers. mox never copies credentials to the VPS and refuses to run its
+Telegram bot on a remote host unless explicitly allowed. Detached runs are
+recorded and audited with
+.B mox vps ps
+and
+.B mox vps cleanup
+.
+.SH SEE ALSO
+README.md, docs/architecture.md, docs/security.md

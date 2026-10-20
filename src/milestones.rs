@@ -771,6 +771,9 @@ pub fn run(action: Option<MilestoneAction>, file: Option<PathBuf>) -> Result<()>
     if let Some(verb) = transition {
         println!("{verb}");
         print!("{}", render_progress(&board, Utc::now()));
+        if let Ok(cfg) = Config::load(None) {
+            let _ = crate::events::record(&cfg, "milestone", &board.slug, &verb);
+        }
         notify_transition(&board, &verb);
     }
     if let Some(id) = completed {

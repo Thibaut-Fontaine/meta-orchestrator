@@ -9,6 +9,7 @@
 //! The queue is local, dependency-free and fully deterministic with an injected
 //! `now`, which keeps the time logic testable.
 
+use crate::exec::{CommandRunner, CommandSpec};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -147,6 +148,16 @@ pub struct Check {
     pub done_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub done_note: String,
+    /// Recurrence in seconds; when set, `done` reschedules instead of closing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_secs: Option<u64>,
+    /// Read-only VPS probe, e.g. `systemctl is-active fetcher`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_at: Option<DateTime<Utc>>,
 }
 
 impl Check {
@@ -174,7 +185,16 @@ impl Check {
             updated_at: now,
             done_at: None,
             done_note: String::new(),
+            every_secs: None,
+            probe: None,
+            probe_note: None,
+            probe_at: None,
         }
+    }
+
+    pub fn with_probe(mut self, probe: Option<String>) -> Self {
+        self.probe = probe;
+        self
     }
 }
 
@@ -270,6 +290,8 @@ impl CheckStore {
             existing.kind = check.kind;
             existing.priority = check.priority;
             existing.due_at = check.due_at;
+            existing.every_secs = check.every_secs;
+            existing.probe = check.probe;
             existing.updated_at = check.created_at;
             return existing.id.clone();
         }
@@ -296,6 +318,17 @@ impl CheckStore {
         let Some(check) = self.checks.iter_mut().find(|c| c.id == id) else {
             bail!("unknown check `{id}`");
         };
+        if let Some(every) = check.every_secs.filter(|e| *e > 0) {
+            check.status = CheckStatus::Open;
+            check.due_at = Some(now + Duration::seconds(every as i64));
+            check.done_at = Some(now);
+            check.probe_note = None;
+            check.updated_at = now;
+            if !note.trim().is_empty() {
+                check.done_note = note.trim().to_string();
+            }
+            return Ok(());
+        }
         check.status = CheckStatus::Done;
         check.done_at = Some(now);
         check.updated_at = now;
@@ -374,6 +407,31 @@ pub fn save(path: &Path, store: &CheckStore) -> Result<()> {
     crate::util::write_private(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Parse a duration (`30m`, `2h`, `3d`, `1w`) into seconds.
+pub fn parse_span(input: &str) -> Result<u64> {
+    let text = input.trim().to_ascii_lowercase();
+    let text = text.strip_prefix("every ").unwrap_or(&text).trim();
+    let split = text.find(|c: char| !c.is_ascii_digit() && c != '.');
+    let Some(index) = split else {
+        bail!("duration `{input}` has no unit (use s, m, h, d or w)");
+    };
+    let number: f64 = text[..index]
+        .parse()
+        .with_context(|| format!("invalid number in duration `{input}`"))?;
+    if !number.is_finite() || number <= 0.0 {
+        bail!("duration `{input}` must be positive");
+    }
+    let seconds = match text[index..].trim() {
+        "s" | "sec" | "secs" | "seconds" => number,
+        "m" | "min" | "mins" | "minutes" => number * 60.0,
+        "h" | "hr" | "hrs" | "hours" => number * 3600.0,
+        "d" | "day" | "days" => number * 86_400.0,
+        "w" | "week" | "weeks" => number * 604_800.0,
+        other => bail!("unknown unit `{other}` in duration `{input}`"),
+    };
+    Ok(seconds.round() as u64)
 }
 
 /// Parse `+2h`, `90m`, `3d`, `1w`, `now`, or an RFC3339 timestamp.
@@ -587,11 +645,24 @@ pub fn render_limited(
                 when = relative_label(check, now),
                 prio = check.priority.as_str(),
             ));
+            let mut notes = Vec::new();
             if !check.detail.trim().is_empty() {
+                notes.push(format!("detail: {}", check.detail.trim()));
+            }
+            if let Some(every) = check.every_secs {
+                notes.push(format!("every {}", crate::util::format_secs(every)));
+            }
+            if let Some(probe) = &check.probe {
+                notes.push(format!("probe: {probe}"));
+            }
+            if let Some(note) = &check.probe_note {
+                notes.push(format!("last probe: {note}"));
+            }
+            if !notes.is_empty() {
                 out.push_str(&format!(
                     "  {}   {}\n",
                     " ".repeat(10 + 1 + 20 + 1 + 8 + 1),
-                    crate::util::truncate_chars(check.detail.trim(), 100)
+                    crate::util::truncate_chars(&notes.join(" · "), 140)
                 ));
             }
         }
@@ -683,6 +754,114 @@ impl ImportOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeResult {
+    pub ok: bool,
+    pub observed: String,
+}
+
+/// Run a restricted, read-only probe on the VPS.
+///
+/// Supported forms:
+/// * `systemctl is-active <unit>`
+/// * `disk_free > 5G`
+/// * `http 200 https://example.com/health`
+pub fn run_probe(
+    runner: &dyn CommandRunner,
+    cfg: &crate::config::Config,
+    probe: &str,
+) -> Result<ProbeResult> {
+    let fields: Vec<&str> = probe.split_whitespace().collect();
+    let ssh = |command: &str| {
+        CommandSpec::new(&cfg.ssh_bin)
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6"])
+            .arg(&cfg.ssh_alias)
+            .arg(command)
+            .timeout(25)
+    };
+    match fields.as_slice() {
+        ["systemctl", "is-active", unit] => {
+            if !unit
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.@:-".contains(c))
+            {
+                bail!("invalid systemd unit in probe");
+            }
+            let output = runner.run(&ssh(&format!("systemctl is-active {unit}")))?;
+            if !output.success() {
+                return Ok(ProbeResult {
+                    ok: false,
+                    observed: output.stderr.trim().to_string(),
+                });
+            }
+            let observed = output.stdout.trim().to_string();
+            Ok(ProbeResult {
+                ok: observed == "active",
+                observed,
+            })
+        }
+        ["disk_free", ">", size] => {
+            let threshold_mb = parse_size_mb(size)?;
+            let output = runner.run(&ssh("df -Pm / | awk 'NR==2{print $4}'"))?;
+            if !output.success() {
+                return Ok(ProbeResult {
+                    ok: false,
+                    observed: output.stderr.trim().to_string(),
+                });
+            }
+            let free_mb: u64 = output
+                .stdout
+                .trim()
+                .parse()
+                .with_context(|| format!("unexpected df output: {}", output.stdout.trim()))?;
+            Ok(ProbeResult {
+                ok: free_mb > threshold_mb,
+                observed: format!("{free_mb} MiB free (threshold {threshold_mb} MiB)"),
+            })
+        }
+        ["http", code, url] => {
+            let expected: u16 = code.parse().context("invalid HTTP status in probe")?;
+            if !(100..=599).contains(&expected) {
+                bail!("HTTP status must be between 100 and 599");
+            }
+            if !(url.starts_with("http://") || url.starts_with("https://"))
+                || url.contains(['\'', '"', ' '])
+            {
+                bail!("invalid URL in probe");
+            }
+            let output = runner.run(&ssh(&format!(
+                "curl -sS -o /dev/null -w '%{{http_code}}' --max-time 10 '{url}'"
+            )))?;
+            if !output.success() {
+                return Ok(ProbeResult {
+                    ok: false,
+                    observed: output.stderr.trim().to_string(),
+                });
+            }
+            let observed = output.stdout.trim().to_string();
+            Ok(ProbeResult {
+                ok: observed == expected.to_string(),
+                observed,
+            })
+        }
+        _ => bail!(
+            "unsupported probe `{probe}` (use `systemctl is-active <unit>`, `disk_free > 5G` or `http 200 <url>`)"
+        ),
+    }
+}
+
+fn parse_size_mb(input: &str) -> Result<u64> {
+    let text = input.trim().to_ascii_uppercase();
+    let (number, multiplier) = match text.chars().last() {
+        Some('G') => (&text[..text.len() - 1], 1024),
+        Some('M') => (&text[..text.len() - 1], 1),
+        Some('T') => (&text[..text.len() - 1], 1024 * 1024),
+        _ => bail!("size must end with M, G or T"),
+    };
+    let value: f64 = number.parse().context("invalid size")?;
+    Ok((value * multiplier as f64) as u64)
+}
+
 /// Import the `CHECKS.md` format written by agents:
 ///
 /// ```text
@@ -715,6 +894,8 @@ pub fn import_markdown(
         let mut kind = CheckKind::Manual;
         let mut priority = Priority::Normal;
         let mut detail = String::new();
+        let mut every = None;
+        let mut probe = None;
         for part in parts {
             let Some((key, value)) = part.split_once(':') else {
                 continue;
@@ -733,6 +914,8 @@ pub fn import_markdown(
                     }
                 }
                 "detail" | "note" => detail = value.to_string(),
+                "every" => every = parse_span(value).ok(),
+                "probe" => probe = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -747,6 +930,8 @@ pub fn import_markdown(
                 existing.kind = kind;
                 existing.priority = priority;
                 existing.due_at = due_at;
+                existing.every_secs = every;
+                existing.probe = probe;
                 if !detail.is_empty() {
                     existing.detail = detail;
                 }
@@ -757,7 +942,9 @@ pub fn import_markdown(
             continue;
         }
 
-        let check = Check::new(slug, title, kind, priority, due_at, detail, now);
+        let mut check = Check::new(slug, title, kind, priority, due_at, detail, now);
+        check.every_secs = every;
+        check.probe = probe;
         store.add(check);
         outcome.created += 1;
     }
@@ -1089,6 +1276,95 @@ not a checklist line
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].bucket, "overdue");
         assert_eq!(views[0].due_in_seconds, Some(-120));
+    }
+
+    #[test]
+    fn recurrence_reschedules_instead_of_closing() {
+        let mut store = CheckStore::default();
+        let mut check = check("daily audit", Some(now()));
+        check.every_secs = Some(86_400);
+        let id = store.add(check);
+        store.mark_done(&id, "ok", now()).unwrap();
+        let stored = store.get(&id).unwrap();
+        assert_eq!(stored.status, CheckStatus::Open);
+        assert_eq!(stored.due_at, Some(now() + Duration::days(1)));
+        assert!(stored.done_at.is_some());
+    }
+
+    #[test]
+    fn imports_every_and_probe_fields() {
+        let mut store = CheckStore::default();
+        import_markdown(
+            &mut store,
+            "demo",
+            "- [ ] Watch the cron | due: +1h | every: 1d | probe: systemctl is-active fetcher\n",
+            now(),
+        );
+        let check = &store.checks[0];
+        assert_eq!(check.every_secs, Some(86_400));
+        assert_eq!(check.probe.as_deref(), Some("systemctl is-active fetcher"));
+    }
+
+    #[test]
+    fn parse_span_units() {
+        assert_eq!(parse_span("30m").unwrap(), 1800);
+        assert_eq!(parse_span("2h").unwrap(), 7200);
+        assert_eq!(parse_span("1d").unwrap(), 86_400);
+        assert_eq!(parse_span("1w").unwrap(), 604_800);
+        assert!(parse_span("0h").is_err());
+        assert!(parse_span("soon").is_err());
+    }
+
+    #[test]
+    fn probes_are_read_only_and_restricted() {
+        use crate::exec::FakeRunner;
+        use crate::exec::Output;
+        let cfg = crate::config::Config::default();
+        let runner = FakeRunner::new(|spec| {
+            let command = spec.args.last().cloned().unwrap_or_default();
+            if command.contains("systemctl is-active") {
+                return Output {
+                    code: Some(0),
+                    stdout: "active\n".into(),
+                    ..Output::default()
+                };
+            }
+            if command.contains("df -Pm") {
+                return Output {
+                    code: Some(0),
+                    stdout: "4096\n".into(),
+                    ..Output::default()
+                };
+            }
+            if command.contains("curl") {
+                return Output {
+                    code: Some(0),
+                    stdout: "200\n".into(),
+                    ..Output::default()
+                };
+            }
+            Output::ok()
+        });
+        assert!(
+            run_probe(&runner, &cfg, "systemctl is-active fetcher")
+                .unwrap()
+                .ok
+        );
+        assert!(run_probe(&runner, &cfg, "disk_free > 1G").unwrap().ok);
+        assert!(!run_probe(&runner, &cfg, "disk_free > 8G").unwrap().ok);
+        assert!(
+            run_probe(&runner, &cfg, "http 200 https://example.com/health")
+                .unwrap()
+                .ok
+        );
+        assert!(
+            !run_probe(&runner, &cfg, "http 500 https://example.com/health")
+                .unwrap()
+                .ok
+        );
+        assert!(run_probe(&runner, &cfg, "rm -rf /").is_err());
+        assert!(run_probe(&runner, &cfg, "systemctl is-active bad;unit").is_err());
+        assert!(run_probe(&runner, &cfg, "http 200 file:///etc/passwd").is_err());
     }
 
     #[test]

@@ -243,6 +243,32 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
     )
 }
 
+/// Second planning pass: use the answers to refine the spec.
+pub fn refinement_prompt(specs: &[ProjectSpec]) -> String {
+    let mut out = String::from(
+        "You are refining project specifications after the owner answered clarifying questions.\n\
+         For each project, rewrite the summary, acceptance criteria, assumptions and risks so they\n\
+         match the answers. Keep them concrete and testable. Do not invent requirements.\n\
+         Return ONE JSON object: {\"projects\":[{\"slug\":\"...\",\"summary\":\"...\",\n\
+         \"acceptance_criteria\":[\"...\"],\"assumptions\":[\"...\"],\"risks\":[\"...\"]}]}\n\n",
+    );
+    for spec in specs {
+        out.push_str(&format!(
+            "## {} (`{}`)\nIdea: {}\nSummary so far: {}\nAnswers:\n{}\n\n",
+            spec.title,
+            spec.slug,
+            spec.idea,
+            spec.summary,
+            spec.answer_lines()
+                .into_iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    out
+}
+
 /// Prompt for a post-run reflection on one project.
 pub fn reflection_prompt(spec: &ProjectSpec, status_md: &str, log_tail: &str) -> String {
     format!(
@@ -661,6 +687,21 @@ mod tests {
         assert!(prompt.contains("## Historical calibration"));
         assert!(prompt.contains("1.20×"));
         assert!(prompt.contains("medium"));
+    }
+
+    #[test]
+    fn refinement_prompt_uses_answers() {
+        let mut spec = ProjectSpec::from_idea(&idea("X", "x"), "x".into());
+        spec.questions.push(Question {
+            id: "q1".into(),
+            question: "Which DB?".into(),
+            why: None,
+            default: None,
+        });
+        spec.answers.insert("q1".into(), "SQLite".into());
+        let prompt = refinement_prompt(&[spec]);
+        assert!(prompt.contains("SQLite"));
+        assert!(prompt.contains("acceptance_criteria"));
     }
 
     #[test]

@@ -40,6 +40,9 @@ pub enum Command {
         /// Overwrite an existing config file.
         #[arg(long)]
         force: bool,
+        /// Configuration preset.
+        #[arg(long, default_value = "standard", value_parser = ["minimal", "standard", "paranoid"])]
+        profile: String,
     },
 
     /// Check the local environment (tools, auth, disk, VPS, cores).
@@ -70,6 +73,10 @@ pub enum Command {
         /// Force interactive questions even when stdin is not a TTY.
         #[arg(long)]
         interactive: bool,
+
+        /// Second planning pass: refine the spec from the answers.
+        #[arg(long)]
+        deep: bool,
     },
 
     /// Create workspaces, private GitHub repos, then run agents in parallel.
@@ -167,6 +174,9 @@ pub enum Command {
         /// Delete even if an agent might be running.
         #[arg(long)]
         force: bool,
+        /// Also delete logs/prompts older than this many days.
+        #[arg(long, value_name = "DAYS")]
+        logs_older_than_days: Option<u64>,
     },
 
     /// Stop a running agent.
@@ -208,6 +218,10 @@ pub enum Command {
         /// Show only the first N open checks.
         #[arg(long, value_name = "N")]
         top: Option<usize>,
+
+        /// Append project path and short commit after each check.
+        #[arg(long)]
+        context: bool,
     },
 
     /// Track milestones, progress and ETA for the project in the current dir.
@@ -224,6 +238,20 @@ pub enum Command {
     Project {
         #[command(subcommand)]
         action: ProjectAction,
+    },
+
+    /// Print a shell completion script.
+    Completions {
+        /// bash, zsh or fish.
+        #[arg(value_parser = ["bash", "zsh", "fish"])]
+        shell: String,
+    },
+
+    /// Show the local event log.
+    Events {
+        /// Number of trailing lines.
+        #[arg(long, default_value_t = 20)]
+        tail: usize,
     },
 
     /// Write a Markdown report across all projects.
@@ -352,6 +380,14 @@ pub enum ProjectAction {
         /// Project slug.
         slug: String,
     },
+    /// Register an existing directory under the projects root as a project.
+    Adopt {
+        /// Directory to adopt (must be inside projects_root).
+        path: PathBuf,
+        /// Override the slug derived from the directory name.
+        #[arg(long)]
+        slug: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,6 +424,15 @@ pub enum CheckAction {
         /// Longer explanation shown under the check.
         #[arg(long, default_value = "")]
         detail: String,
+
+        /// Recurrence: 1d, 12h, 30m (done reschedules instead of closing).
+        #[arg(long)]
+        every: Option<String>,
+
+        /// Read-only VPS probe: `systemctl is-active <unit>`, `disk_free > 5G`,
+        /// or `http 200 <url>`.
+        #[arg(long)]
+        probe: Option<String>,
     },
 
     /// Mark a check as done.
@@ -435,6 +480,12 @@ pub enum CheckAction {
         #[arg(long, default_value_t = 300)]
         interval: u64,
     },
+    /// Run the read-only VPS probes attached to checks and mark failures due.
+    Probe {
+        /// Only this project slug.
+        #[arg(long)]
+        slug: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -469,6 +520,12 @@ pub enum VpsCommand {
         /// Only this project slug.
         #[arg(long)]
         slug: Option<String>,
+        /// Keep polling (Ctrl-C to quit).
+        #[arg(long)]
+        watch: bool,
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 60)]
+        interval: u64,
     },
     /// List mox/agent processes on the VPS and flag untracked ghosts.
     Ps,
@@ -495,6 +552,23 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn parses_init_profile_and_completions() {
+        let cli = Cli::try_parse_from(["mox", "init", "--profile", "paranoid"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Init {
+                profile,
+                force: false
+            } if profile == "paranoid"
+        ));
+        let cli = Cli::try_parse_from(["mox", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions { ref shell } if shell == "bash"
+        ));
+    }
+
+    #[test]
     fn parses_plan_flags() {
         let cli = Cli::try_parse_from([
             "mox",
@@ -514,11 +588,13 @@ mod tests {
                 ideas,
                 answers,
                 yes,
+                deep,
                 ..
             } => {
                 assert_eq!(ideas.unwrap().to_str().unwrap(), "ideas.txt");
                 assert_eq!(answers.unwrap().to_str().unwrap(), "answers.toml");
                 assert!(yes);
+                assert!(!deep);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -672,12 +748,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_project_adopt_and_sync_watch() {
+        let cli = Cli::try_parse_from(["mox", "project", "adopt", "/tmp/x"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Project {
+                action: ProjectAction::Adopt { .. }
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "vps", "sync", "--watch"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Sync { watch: true, .. }
+            }
+        ));
+    }
+
+    #[test]
     fn parses_project_remove() {
         let cli = Cli::try_parse_from(["mox", "project", "remove", "demo"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Project {
                 action: ProjectAction::Remove { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_events_and_log_retention() {
+        let cli = Cli::try_parse_from(["mox", "events", "--tail", "5"]).unwrap();
+        assert!(matches!(cli.command, Command::Events { tail: 5 }));
+        let cli = Cli::try_parse_from(["mox", "clean", "--logs-older-than-days", "30"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Clean {
+                logs_older_than_days: Some(30),
+                ..
             }
         ));
     }
@@ -761,7 +869,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Vps {
-                action: VpsCommand::Sync { slug: Some(ref s) }
+                action: VpsCommand::Sync { slug: Some(ref s), .. }
             } if s == "demo"
         ));
     }
@@ -864,6 +972,7 @@ mod tests {
             (vec!["mox", "check", "reopen", "abc"], true),
             (vec!["mox", "check", "export", "--format", "json"], true),
             (vec!["mox", "check", "daemon"], true),
+            (vec!["mox", "check", "probe"], true),
         ] {
             assert!(Cli::try_parse_from(argv.clone()).is_ok(), "{argv:?}");
             assert!(ok);

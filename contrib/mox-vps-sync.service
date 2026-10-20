@@ -1,0 +1,8 @@
+# Optional user service: poll detached VPS runs once.
+[Unit]
+Description=mox VPS sync (detached runs)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mox vps sync

@@ -93,7 +93,7 @@ agent cannot: a VPS service or cron, an API key/quota, a deploy, a data sample.
 Format — one check per line, only the title is required:
 
 ```text
-- [ ] Short imperative title | due: +2h | kind: vps | priority: high | detail: what to look at
+- [ ] Short imperative title | due: +2h | kind: vps | priority: high | detail: what to look at | every: 1d | probe: systemctl is-active fetcher
 ```
 
 * `due`: `+30m`, `+2h`, `+3d`, `+1w`, `now`, or an RFC3339 timestamp. Omit for
@@ -101,6 +101,10 @@ Format — one check per line, only the title is required:
 * `kind`: `vps`, `api`, `deploy`, `manual`, `data`, `security`, `other`.
 * `priority`: `low`, `normal`, `high`, `critical`.
 * `detail`: one extra sentence, no secrets.
+* `every`: recurrence (`1d`, `12h`); marking it done reschedules it.
+* `probe`: read-only VPS check. Supported forms:
+  `systemctl is-active <unit>`, `disk_free > 5G`, `http 200 https://…`.
+  `mox check probe` marks failures due now with high priority.
 
 Rules:
 
@@ -235,6 +239,7 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
         (".gitignore", GITIGNORE.to_string()),
         ("TASK.md", task_markdown(cfg, spec)),
         ("CHECKS.md", CHECKS_MD.to_string()),
+        ("TASKS.md", tasks_markdown(spec)),
         (
             "opencode.json",
             serde_json::to_string_pretty(&opencode_permissions).unwrap() + "\n",
@@ -277,6 +282,32 @@ fn write_new(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("creating {}", path.display()))?;
     file.write_all(content.as_bytes())?;
     Ok(())
+}
+
+fn tasks_markdown(spec: &ProjectSpec) -> String {
+    let milestones = if spec.milestones.is_empty() {
+        crate::milestones::fallback_for(spec)
+    } else {
+        spec.milestones.clone()
+    };
+    let mut out = format!("# Tasks — {}\n\n", spec.title);
+    for milestone in milestones {
+        out.push_str(&format!(
+            "## {} · {} (~{})\n\n",
+            milestone.id,
+            milestone.title,
+            crate::util::format_secs(milestone.estimate_secs)
+        ));
+        if milestone.todos.is_empty() {
+            out.push_str("- [ ] Complete the milestone and commit\n");
+        } else {
+            for todo in milestone.todos {
+                out.push_str(&format!("- [ ] {todo}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn readme(spec: &ProjectSpec) -> String {
@@ -428,7 +459,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scaffolding = scaffold_project(&cfg(dir.path()), &spec()).unwrap();
         assert!(!scaffolding.existed);
-        assert_eq!(scaffolding.created.len(), 7);
+        assert_eq!(scaffolding.created.len(), 8);
         let project = dir.path().join("demo");
         assert!(project.join("README.md").exists());
         assert!(project.join("AGENTS.md").exists());
@@ -437,6 +468,10 @@ mod tests {
         assert!(project.join("CHECKS.md").exists());
         assert!(project.join("MILESTONES.json").exists());
         assert!(project.join("opencode.json").exists());
+        assert!(project.join("TASKS.md").exists());
+        assert!(std::fs::read_to_string(project.join("TASKS.md"))
+            .unwrap()
+            .contains("m1"));
         let perms = crate::guard::opencode_permissions(&project);
         assert_eq!(perms["permission"]["bash"]["ssh *"], "deny");
         let board = crate::milestones::load(&project.join("MILESTONES.json")).unwrap();

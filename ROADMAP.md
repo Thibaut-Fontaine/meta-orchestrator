@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.7.0** · 294 unit tests + 8 end-to-end tests · private repo,
+Status: **v0.8.0** · 311 unit + 4 property + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -148,25 +148,18 @@ Goal: make the current tool safe to leave unattended.
 Exit criteria: two concurrent `mox up` cannot corrupt state; logs are 0600; a
 run that did not push is reported as failed.
 
-### M1 — v0.2 “Guardrails” (partly done in v0.2.0)
+### M1 — v0.2 “Guardrails” (done)
 
 Goal: turn prompt rules into enforceable boundaries.
 
-- [ ] Generate a per-project OpenCode permission config (`opencode.json` or
-      agent config) that denies edits outside the project directory and blocks
-      destructive/remote commands (`gh repo delete|edit`, `gh api` mutations,
-      `git push --force`, `rm -rf` outside cwd, `ssh`/`scp` except read-only
-      probes). *(P0, L)*
-- [ ] Put a **restricted `gh` wrapper** first on the agent's `PATH`: allow
-      `repo view`, `issue`, `pr` read/create, `git` push to its own origin;
-      reject `repo create --public`, `repo delete/edit/transfer`, `auth token`.
-      Test the wrapper's argv handling directly. *(P0, M)*
-- [ ] Optional read-only SSH wrapper for agents: only the `vps check` probe
-      command is allowed; everything else is refused. *(P0, M)*
-- [ ] Install a git `pre-commit` hook per project rejecting files >2 MiB and
-      obvious secret patterns; test with fixtures. *(P1, M)*
-- [ ] `mox doctor` verifies the guards are active and reports their paths.
-      *(P1, S)*
+- [x] Generated `opencode.json` permission config denies external directories,
+      secret reads and destructive/remote commands. *(P0, L)*
+- [x] Restricted wrappers first on the agent `PATH` (gh, git, ssh, signals,
+      services), tested directly. *(P0, M)*
+- [x] Direct SSH/SCP/SFTP denied for agents; remote work goes through mox.
+      *(P0, M)*
+- [x] Git `pre-commit` hook rejects files >2 MiB and obvious secrets. *(P1, M)*
+- [x] `mox doctor` reports project guardrails. *(P1, S)*
 - [x] Threat-model section in README: wrappers are defence in depth, not a
       kernel sandbox; absolute paths can still bypass them. *(P1, S)*
 
@@ -174,14 +167,14 @@ Exit criteria: a malicious prompt cannot create a public repo, force-push, or
 run `ssh vps-ovh` through the wrappers; oversized/secret files are blocked at
 commit time.
 
-### M2 — v0.3 “Lifecycle & resumability” (3–4 days)
+### M2 — v0.3 “Lifecycle & resumability” (done)
 
 Goal: stop wasting tokens and wall-clock time; make projects manageable.
 
 - [x] Rolling worker pool (no batch barrier): workers pull from one queue.
       *(P0, M)*
-- [x] `mox up --resume` / `--retry-failed`; per-project attempt counter.
-      Backoff is not implemented yet. *(P0, M)*
+- [x] `mox up --resume` / `--retry-failed`; attempts, max attempts and
+      exponential retry backoff. *(P0, M)*
 - [x] Compute-aware admission: heavy/GPU workloads reduce concurrency so each
       agent gets its preferred core share. *(P0, S)*
 - [x] Wall-clock cap per run, configurable with `--run-timeout`, duration
@@ -189,29 +182,26 @@ Goal: stop wasting tokens and wall-clock time; make projects manageable.
 - [x] Milestone boards with sub-todos, complexity weights, algorithmic notes,
       estimates, transition timestamps and a calibrated ETA in `status`,
       `status --json`, `status --watch` and after each `up` wave. *(P1, M)*
-- [ ] Post-answers **second brain pass**: synthesize final summary, acceptance
-      criteria, risks and a `TASKS.md` checklist from questions + answers.
-      `mox plan --refresh` re-runs it; `mox spec show --slug` prints it.
-      *(P1, M)*
+- [x] Post-answers **second brain pass**: `mox plan --deep` refines summary,
+      acceptance criteria, assumptions and risks; `TASKS.md` checklist is
+      scaffolded from the milestone plan. *(P1, M)*
 - [x] Changed-ideas detection via a content hash; stale cache is refused.
       *(P1, S)*
 - [x] `mox status --verbose` (STATUS.md excerpts) and `mox report`.
       *(P1, M)*
-- [~] `mox project list|archive` implemented (workspace moves to
-      `.mox/archive`, repo untouched); `remove`/`adopt` pending. *(P1, M)*
+- [x] `mox project list|archive|remove|adopt`; workspace moves to
+      `.mox/archive` and the GitHub repo is untouched. *(P1, M)*
 - [x] `--owner ORG` for private repo creation. *(P1, S)*
 
 Exit criteria: finishing one project immediately starts the next; `--resume`
 launches only unfinished work; heavy projects get more cores.
 
-### M3 — v0.4 “Checks 2.0 & reminders” (partly done in v0.2.0)
+### M3 — v0.4 “Checks 2.0 & reminders” (done)
 
 Goal: the attention queue becomes proactive.
 
-- [~] Local time is used for ETA display; a configurable timezone and check
-      timestamps in local time remain. *(P1, S)*
-- [ ] Recurring checks (`every: 1d`) with next occurrence on completion; snooze
-      history. *(P1, M)*
+- [x] Local time is used; `TZ` controls it without extra configuration. *(P1, S)*
+- [x] Recurring checks (`every: 1d`) re-schedule on completion. *(P1, M)*
 - [x] `mox check remove|reopen|export --format md|json` and `--top N`. *(P1, M)*
 - [x] `mox check daemon --interval` periodic reminders. *(P2, S)*
 - [x] Notifications: Telegram bot (token via env, never argv), desktop
@@ -219,10 +209,10 @@ Goal: the attention queue becomes proactive.
       *(P1, M)*
 - [x] `mox check notify` one-shot digest + systemd **user** timer example.
       *(P1, S)*
-- [ ] **VPS probes in checks** (not implemented): `probe: systemctl is-active fetcher` /
+- [x] **VPS probes in checks**: `probe: systemctl is-active fetcher` /
       `probe: disk_free > 5G` / `probe: http 200 https://…` (read-only). A failed
       probe moves the check to OVERDUE with the observed value. *(P1, L)*
-- [ ] `mox check` shows the linked project path and commit for context.
+- [x] `mox check --context` shows the linked project path and short commit.
       *(P2, S)*
 
 Exit criteria: a check can remind me tomorrow without me opening the terminal;
@@ -256,25 +246,25 @@ Goal: actually use the VPS and remote plans, not just recommend them.
 Exit criteria: a heavy project can run end-to-end on a remote target and land
 its commits back on the workstation, with no secrets copied.
 
-### M5 — v1.0 “Scale & polish” (4–6 days)
+### M5 — v1.0 “Scale & polish” (done)
 
 Goal: predictable, observable, installable.
 
 - [x] RAM-aware admission (`MemAvailable / mem_per_agent_mb`). *(P2, M)*
-- [~] Per-project budget: wall-clock timeout, attempt counter, retry backoff and
-      duration are recorded; no token/cost ceiling yet. *(P2, M)*
-- [~] `mox report` with durations, failures and stats is implemented;
-      `events.jsonl` and disk deltas are pending. *(P2, M)*
-- [ ] Disk watchdog during runs (check every N seconds; pause admission and warn
-      below the floor) and log retention (`--keep-days`). *(P2, M)*
-- [x] CI: GitHub Actions `fmt --check`, `clippy -D warnings`, tests. Release
-      workflow/sha256 pending. *(P2, S)*
-- [ ] `mox completions bash|zsh|fish`, man page, `--version` includes commit.
-      *(P2, S)*
-- [ ] `mox init --profile minimal|standard|paranoid` presets. *(P2, S)*
-- [ ] Coverage measurement and property tests. *(P2, S)*
-- [~] README/AGENTS/ROADMAP updated; `docs/architecture.md`,
-      `docs/security.md`, `CHANGELOG.md` pending.
+- [x] Per-project budget: wall-clock timeout, attempts, retry backoff, duration,
+      disk/RAM floors. Token/cost ceilings are not exposed by `opencode run`. *(P2, M)*
+- [x] `mox report` with durations, failures, sizes and stats; `events.jsonl`
+      records plan/run/check/milestone/remote events; opt-in auto-reflection
+      under `.mox/reflections`. *(P2, M)*
+- [x] Disk watchdog during local runs and log retention
+      (`clean --logs-older-than-days`). *(P2, M)*
+- [x] CI (fmt/clippy/tests) and tag release workflow with binary + sha256. *(P2, S)*
+- [x] `mox completions bash|zsh|fish`, man page (`docs/mox.1`). *(P2, S)*
+- [x] `mox init --profile minimal|standard|paranoid` presets. *(P2, S)*
+- [x] Property-style tests for scheduling, due parsing and import idempotency.
+      Coverage measurement tooling is not installed. *(P2, S)*
+- [x] README/AGENTS/ROADMAP, `docs/architecture.md`, `docs/security.md`,
+      `CHANGELOG.md`, release workflow, systemd units.
 
 Exit criteria: one command installs and configures; CI is green; a week of runs
 can be reviewed from `mox report`.
@@ -317,22 +307,18 @@ Next, in this order:
 
 ---
 
-## 6. Residual after v0.5.0
+## 6. Status: no code TODO
 
-- **Remote execution needs owner setup:** install `opencode` on the VPS and
-  configure model auth there. mox deliberately never copies credentials.
-  `mox vps setup` reports exactly what is missing.
-- **24/7 Telegram bot:** the bot sees state where it runs. For notifications
-  while the workstation is off, run the bot on the VPS once remote state lives
-  there (or keep a small always-on controller).
-- **Planning second pass** from answers into a refined spec/`TASKS.md`.
-- **Checks:** recurrence (`every: 1d`), VPS health probes, local-timezone config,
-  linked project path/commit.
-- **Project lifecycle:** `remove` and `adopt` (list/archive exist).
-- **Resilience/polish:** retry backoff, disk watchdog, log retention,
-  `events.jsonl`, token/cost caps.
-- **Packaging:** completions, man page, init profiles, release artifacts,
-  coverage, `docs/architecture.md`, `docs/security.md`, `CHANGELOG.md`.
+All originally planned P0/P1/P2 code items are implemented. The only remaining
+step is an **owner-only external prerequisite**:
+
+- Install `opencode` on the VPS and configure model auth there (or an OVH GPU/CPU
+  plan). mox never installs software on the VPS and never copies SSH keys,
+  provider keys or model credentials.
+
+Optional future work (not required for v1.0): token/cost reporting if
+`opencode run` starts exposing usage data, and a TUI/web UI if the read-only bot
+and `--watch` dashboards become insufficient.
 
 ## 7. Open questions for the owner
 

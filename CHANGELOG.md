@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- Checks recurrence, read-only VPS probes, `--context` path/commit.
+- Project adopt; detach/sync watch; disk watchdog; log retention; events.jsonl;
+  max attempts/backoff.
+- Second planning pass (`mox plan --deep`), `TASKS.md`, init profiles,
+  completions, man page, systemd units, property tests, release workflow.
+- Opt-in auto-reflection after successful runs.
+- No mox code TODO remains; only owner-side OpenCode setup on the VPS.
+
 ## 0.7.0
 
 - Ghost wall: `mox bot` refuses remote contexts unless explicitly allowed;

@@ -1,0 +1,20 @@
+# Optional user service: read-only Telegram bot.
+# Install: mkdir -p ~/.config/systemd/user
+#          cp contrib/mox-bot.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload
+#          systemctl --user enable --now mox-bot.service
+# The token must be provided by the environment; do not put it in this unit.
+[Unit]
+Description=mox read-only Telegram bot
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/mox bot
+Restart=on-failure
+RestartSec=10
+# EnvironmentFile=%h/.config/mox/telegram.env   # MOX_TELEGRAM_TOKEN=...
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

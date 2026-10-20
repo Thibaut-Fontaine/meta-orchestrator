@@ -154,7 +154,8 @@ pub fn cleanup_spec(cfg: &Config, alias: &str, pids: &[u32]) -> CommandSpec {
         cfg,
         alias,
         &format!(
-            "kill -TERM {list} 2>/dev/null || true; sleep 2; kill -KILL {list} 2>/dev/null || true; echo cleaned"
+            "for p in {list}; do kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; done; \
+             sleep 2; for p in {list}; do kill -KILL -\"$p\" 2>/dev/null || kill -KILL \"$p\" 2>/dev/null || true; done; echo cleaned"
         ),
         30,
     )

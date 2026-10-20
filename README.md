@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 294 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 311 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -85,7 +85,7 @@ answers:   ~/.local/state/meta-orchestrator/answers.toml
 next: mox up
 
 $ $EDITOR ~/.local/state/meta-orchestrator/answers.toml
-$ mox plan --answers ~/.local/state/meta-orchestrator/answers.toml
+$ mox plan --answers ~/.local/state/meta-orchestrator/answers.toml --deep
 $ mox up                       # scaffold + private repos + parallel agents
 $ mox status
 $ mox logs expense-tracker -n 80
@@ -97,6 +97,7 @@ Useful flags:
 |---|---|
 | `mox plan --yes` | accept defaults, never ask |
 | `mox plan --refresh` | ask the brain again |
+| `mox plan --deep` | second pass: refine summary/acceptance/risks from answers |
 | `mox up --dry-run` (or global `--dry-run`) | show everything, touch nothing |
 | `mox up --only slug` | one project only (repeatable) |
 | `mox up --no-github` | local work only, no repo creation |
@@ -107,6 +108,9 @@ Useful flags:
 | `mox up --target vps --detach` | start a VPS run that survives shutting the workstation down |
 | `mox vps sync [--slug slug]` | poll detached runs, fetch finished work back, update status |
 | `mox bot` / `mox bot --once` | read-only Telegram bot (long-poll / one batch) |
+| `mox completions bash\|zsh\|fish` | print a shell completion script |
+| `mox events [--tail N]` | local event log |
+| `mox init --profile paranoid` | stricter defaults (1 agent, no auto-approve) |
 | `mox vps ps` | audit remote mox/agent processes, flag GHOST/BOT |
 | `mox vps cleanup --apply --yes` | kill only untracked mox-remote/bot pids |
 | `mox up --owner ORG` | create the private repo under an org |
@@ -131,6 +135,9 @@ Useful flags:
 | `mox check add "Verify cron" --project slug --due +2h --kind vps --priority high` | add/refresh a check |
 | `mox check later <id> 2h` | postpone a check |
 | `mox check done <id> --note "looked fine"` | complete a check |
+| `mox check add … --every 1d --probe "systemctl is-active fetcher"` | recurring / probed check |
+| `mox check probe` | run read-only VPS probes; failures become due now |
+| `mox check --context` | show project path and short commit per check |
 | `mox check remove <id>` / `reopen <id>` | delete / reopen a check |
 | `mox check export --format md\|json` | export the queue |
 | `mox check --top 3` | only the three most urgent checks |
@@ -173,6 +180,10 @@ TODAY (1)
 * `due` accepts `+30m`, `+2h`, `+3d`, `+1w`, `now`, or RFC3339; omit it for
   "whenever".
 * `priority` can push an unscheduled check into **NOW** (`high`/`critical`).
+* `every: 1d` makes a check recur; `probe:` attaches a read-only VPS check
+  (`systemctl is-active`, `disk_free >`, `http <code>`). `mox check probe` runs
+  them and promotes failures to **NOW**; `mox check --context` adds the project
+  path and short commit.
 * `mox check --watch` refreshes the view in place (sidebar in a terminal pane);
   `--oneline` is designed for a status bar; `--json` for scripts.
 * Completed checks stay visible with `--all` and are never re-opened by a stale
@@ -355,6 +366,25 @@ Run it under a systemd **user** service if you want it always available; it can
 only see state where it runs. For a bot that stays up while this workstation is
 off, run it on the VPS once mox state lives there (future work).
 
+## Operations
+
+- `mox init --profile minimal|standard|paranoid` writes a stricter preset
+  (`paranoid`: one agent, no auto-approve, 4 GiB floor).
+- `mox events` shows the local JSONL event log; `mox report` includes recent
+  events and timing statistics.
+- `mox clean --logs-older-than-days 30 --apply` prunes old logs/prompts.
+- `mox vps sync --watch --interval 300` keeps polling detached runs; a systemd
+  user timer example is in `contrib/`.
+- `reflect_after_run = true` writes an automatic reflection under
+  `.mox/reflections/` (never into the repo).
+- `mox bot` can run under a user service (`contrib/mox-bot.service`). It must
+  run where state lives; mox does not deploy it to the VPS.
+- Timezone: chrono uses the process `TZ` (for example `TZ=Europe/Paris mox status`).
+- Budgets: wall-clock `--run-timeout`, per-project maximum attempts, retry
+  backoff and disk watchdog are enforced; token/cost ceilings are not exposed by
+  `opencode run` and are not guessed.
+- Shell completions: `mox completions bash`; man page: `docs/mox.1`.
+
 ## Safety rules (enforced, not just documented)
 
 * **Repositories are always private.** `gh repo create … --private` is the only
@@ -435,6 +465,7 @@ CPU:
 ├── <slug>/                  # independent git repo, private GitHub remote
 │   ├── AGENTS.md            # project rules for the agent
 │   ├── TASK.md              # spec, answers, definition of done
+│   ├── TASKS.md             # milestone/sub-todo checklist
 │   ├── CHECKS.md            # human checks the agent requests
 │   ├── MILESTONES.json      # plan + live progress board
 │   ├── README.md
@@ -480,6 +511,7 @@ reserve_cores = 1
 nice_level = 10
 min_free_disk_mb = 2048
 mem_per_agent_mb = 768
+reflect_after_run = false  # write .mox/reflections/<slug>.md after success
 retry_backoff_secs = 5
 project_disk_budget_mb = 4096
 brain_timeout_secs = 900
@@ -533,7 +565,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 294 unit + 8 end-to-end tests
+cargo test                 # 311 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

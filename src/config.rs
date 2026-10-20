@@ -52,6 +52,12 @@ pub struct Config {
     pub mem_per_agent_mb: u64,
     /// Base delay before retrying a failed project (doubles per attempt, max 60s).
     pub retry_backoff_secs: u64,
+    /// Check free disk during local runs; 0 disables.
+    pub disk_watchdog_secs: u64,
+    /// Maximum launch attempts before `--force` is required.
+    pub max_attempts: u32,
+    /// Write an automatic reflection after a successful run (uses the brain).
+    pub reflect_after_run: bool,
     /// Soft budget per project, used by `status` and `clean`.
     pub project_disk_budget_mb: u64,
     /// Timeout for one brainstorming call.
@@ -105,6 +111,9 @@ impl Default for Config {
             min_free_disk_mb: 2048,
             mem_per_agent_mb: 768,
             retry_backoff_secs: 5,
+            disk_watchdog_secs: 30,
+            max_attempts: 3,
+            reflect_after_run: false,
             project_disk_budget_mb: 4096,
             brain_timeout_secs: 900,
             run_timeout_secs: 7200,
@@ -200,6 +209,14 @@ impl Config {
         if let Some(v) = var("MOX_RESERVE_CORES") {
             if let Ok(n) = v.parse() {
                 self.reserve_cores = n;
+            }
+        }
+        if let Some(v) = var("MOX_REFLECT_AFTER_RUN") {
+            self.reflect_after_run = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = var("MOX_DISK_WATCHDOG_SECS") {
+            if let Ok(n) = v.parse() {
+                self.disk_watchdog_secs = n;
             }
         }
         if let Some(v) = var("MOX_RETRY_BACKOFF_SECS") {
@@ -355,6 +372,9 @@ nice_level = {nice_level}
 min_free_disk_mb = {min_free_disk_mb}
 mem_per_agent_mb = {mem_per_agent_mb}
 retry_backoff_secs = {retry_backoff_secs}
+disk_watchdog_secs = {disk_watchdog_secs}
+max_attempts = {max_attempts}
+reflect_after_run = {reflect_after_run}
 project_disk_budget_mb = {project_disk_budget_mb}
 
 # Timeouts.
@@ -397,6 +417,9 @@ webhook_url = {webhook_url:?}
             min_free_disk_mb = self.min_free_disk_mb,
             mem_per_agent_mb = self.mem_per_agent_mb,
             retry_backoff_secs = self.retry_backoff_secs,
+            disk_watchdog_secs = self.disk_watchdog_secs,
+            max_attempts = self.max_attempts,
+            reflect_after_run = self.reflect_after_run,
             project_disk_budget_mb = self.project_disk_budget_mb,
             brain_timeout_secs = self.brain_timeout_secs,
             run_timeout_secs = self.run_timeout_secs,

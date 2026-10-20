@@ -3,10 +3,11 @@
 //! tests with no network, no GitHub and no OpenCode.
 
 use crate::brain::Brain;
-use crate::checks::{self, Check, CheckKind, Priority};
+use crate::checks::{self, Check, CheckKind, CheckStore, Priority};
 use crate::clean;
 use crate::cli::{CheckAction, Command, NotifyAction, VpsCommand};
 use crate::config::Config;
+use crate::events;
 use crate::exec::{CommandRunner, CommandSpec};
 use crate::github;
 use crate::ideas;
@@ -96,6 +97,18 @@ pub struct CheckOptions {
     pub all: bool,
     pub no_sync: bool,
     pub top: Option<usize>,
+    pub context: bool,
+}
+
+/// Options for `mox plan`.
+#[derive(Debug, Clone, Default)]
+pub struct PlanOptions {
+    pub ideas: Option<PathBuf>,
+    pub answers: Option<PathBuf>,
+    pub refresh: bool,
+    pub yes: bool,
+    pub interactive: bool,
+    pub deep: bool,
 }
 
 /// Options for `mox up`.
@@ -174,7 +187,7 @@ impl App {
 
     pub fn run(&mut self, command: Command, out: &mut dyn Write) -> Result<()> {
         match command {
-            Command::Init { force } => self.cmd_init(force, out),
+            Command::Init { force, profile } => self.cmd_init(force, &profile, out),
             Command::Doctor { skip_vps } => self.cmd_doctor(skip_vps, out),
             Command::Plan {
                 ideas,
@@ -182,7 +195,18 @@ impl App {
                 refresh,
                 yes,
                 interactive,
-            } => self.cmd_plan(ideas, answers, refresh, yes, interactive, out),
+                deep,
+            } => self.cmd_plan(
+                PlanOptions {
+                    ideas,
+                    answers,
+                    refresh,
+                    yes,
+                    interactive,
+                    deep,
+                },
+                out,
+            ),
             Command::Up {
                 only,
                 max_parallel,
@@ -228,10 +252,20 @@ impl App {
                 | crate::cli::ProjectAction::Remove { slug } => {
                     self.cmd_project_archive(&slug, out)
                 }
+                crate::cli::ProjectAction::Adopt { path, slug } => {
+                    self.cmd_project_adopt(&path, slug.as_deref(), out)
+                }
             },
             Command::Logs { slug, lines } => self.cmd_logs(&slug, lines, out),
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
-            Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
+            Command::Clean {
+                apply,
+                all,
+                force,
+                logs_older_than_days,
+            } => self.cmd_clean(apply, all, force, logs_older_than_days, out),
+            Command::Events { tail } => self.cmd_events(tail, out),
+            Command::Completions { shell } => self.cmd_completions(&shell, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
             Command::Bot { once, allow_remote } => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -263,6 +297,7 @@ impl App {
                 all,
                 no_sync,
                 top,
+                context,
             } => self.cmd_check(
                 action,
                 CheckOptions {
@@ -273,6 +308,7 @@ impl App {
                     all,
                     no_sync,
                     top,
+                    context,
                 },
                 out,
             ),
@@ -283,7 +319,11 @@ impl App {
                 VpsCommand::Revoke { slug } => self.cmd_vps_revoke(&slug, out),
                 VpsCommand::Approvals => self.cmd_vps_approvals(out),
                 VpsCommand::Setup => self.cmd_vps_setup(out),
-                VpsCommand::Sync { slug } => self.cmd_vps_sync(slug.as_deref(), out),
+                VpsCommand::Sync {
+                    slug,
+                    watch,
+                    interval,
+                } => self.cmd_vps_sync(slug.as_deref(), watch, interval, out),
                 VpsCommand::Ps => self.cmd_vps_ps(out),
                 VpsCommand::Cleanup { apply, yes } => self.cmd_vps_cleanup(apply, yes, out),
                 VpsCommand::Plan { compute } => self.cmd_vps_plan(&compute, out),
@@ -349,9 +389,30 @@ impl App {
             .context("no plan found; run `mox plan --ideas <file>` first")
     }
 
-    fn cmd_init(&mut self, force: bool, out: &mut dyn Write) -> Result<()> {
+    fn cmd_init(&mut self, force: bool, profile: &str, out: &mut dyn Write) -> Result<()> {
         let mut cfg = self.cfg.clone();
         cfg.apply_env();
+        match profile {
+            "minimal" => {
+                cfg.max_parallel = 1;
+                cfg.min_free_disk_mb = 1024;
+                cfg.mem_per_agent_mb = 512;
+                cfg.disk_watchdog_secs = 0;
+            }
+            "paranoid" => {
+                cfg.max_parallel = 1;
+                cfg.reserve_cores = 2;
+                cfg.min_free_disk_mb = 4096;
+                cfg.mem_per_agent_mb = 1024;
+                cfg.auto_approve = false;
+                cfg.standalone = true;
+                cfg.allow_remote_bots = false;
+                cfg.extra_instructions =
+                    "Paranoid profile: prefer read-only inspection; add a CHECKS.md item before risky actions."
+                        .into();
+            }
+            _ => {}
+        }
         let existed = self.cfg_path.exists();
         let wrote = cfg.write(&self.cfg_path, force)?;
         self.cfg = cfg;
@@ -382,6 +443,7 @@ impl App {
             "state dir:     {}",
             display_path(&self.cfg.state_dir_path())
         )?;
+        writeln!(out, "profile:       {profile}")?;
         writeln!(out, "max parallel:  {} agents", self.cfg.max_parallel)?;
         writeln!(out, "next: mox doctor, then mox plan --ideas <file>")?;
         Ok(())
@@ -512,15 +574,7 @@ impl App {
         Ok(())
     }
 
-    fn cmd_plan(
-        &mut self,
-        ideas_path: Option<PathBuf>,
-        answers_path: Option<PathBuf>,
-        refresh: bool,
-        yes: bool,
-        interactive: bool,
-        out: &mut dyn Write,
-    ) -> Result<()> {
+    fn cmd_plan(&mut self, opts: PlanOptions, out: &mut dyn Write) -> Result<()> {
         self.ensure_layout()?;
         let _lock = self.up_lock()?;
         let cached = state::load_plan(&self.cfg.plan_file())?;
@@ -528,7 +582,7 @@ impl App {
         let plan_hash: Option<String>;
         let host_profile: Option<crate::host::HostProfile>;
 
-        let mut specs: Vec<ProjectSpec> = if let Some(path) = &ideas_path {
+        let mut specs: Vec<ProjectSpec> = if let Some(path) = &opts.ideas {
             let ideas = ideas::load_ideas(path)?;
             let source_hash = ideas::file_hash(path);
             writeln!(
@@ -550,7 +604,7 @@ impl App {
             source_name = path.display().to_string();
             plan_hash = source_hash;
             prompts::merge_specs(&ideas, assessed)
-        } else if !refresh {
+        } else if !opts.refresh {
             match cached {
                 Some(plan) => {
                     // Warn instead of silently reusing a stale plan.
@@ -559,7 +613,7 @@ impl App {
                             if &current != hash {
                                 bail!(
                                     "the ideas file changed since this plan was built; \
-                                     rerun `mox plan --ideas {} --refresh`",
+                                     rerun `mox plan --ideas {} --opts.refresh`",
                                     plan.source
                                 );
                             }
@@ -575,12 +629,14 @@ impl App {
                 }
             }
         } else {
-            bail!("`--refresh` needs `--ideas <file>` so the model has something to think about");
+            bail!(
+                "`--opts.refresh` needs `--ideas <file>` so the model has something to think about"
+            );
         };
 
         // Explicit answers file wins; otherwise apply the default one if it
         // exists (it is written as a template after the first plan).
-        let answers_file = answers_path.or_else(|| {
+        let answers_file = opts.answers.or_else(|| {
             let default = self.cfg.answers_file();
             if default.exists() {
                 Some(default)
@@ -599,9 +655,43 @@ impl App {
             writeln!(out, "applied answers from {}", display_path(path))?;
         }
 
-        let should_ask = interactive || (!yes && self.interactive);
+        let should_ask = opts.interactive || (!opts.yes && self.interactive);
         if should_ask {
             self.collect_answers(&mut specs, out)?;
+        }
+
+        if opts.deep && !self.dry_run {
+            writeln!(out, "refining the specification from the answers...")?;
+            let prompt = prompts::refinement_prompt(&specs);
+            let reply = self
+                .brain
+                .think(&prompt, self.cfg.brain_timeout_secs)
+                .context("spec refinement failed")?;
+            let refined = prompts::parse_brain_response(&reply)?;
+            for project in refined {
+                let Some(slug) = project.slug else {
+                    continue;
+                };
+                let Some(spec) = specs
+                    .iter_mut()
+                    .find(|s| s.slug == crate::util::slugify(&slug))
+                else {
+                    continue;
+                };
+                if let Some(summary) = project.summary.filter(|s| !s.trim().is_empty()) {
+                    spec.summary = summary;
+                }
+                if !project.acceptance_criteria.is_empty() {
+                    spec.acceptance_criteria = project.acceptance_criteria;
+                }
+                if !project.risks.is_empty() {
+                    spec.risks = project.risks;
+                }
+                if !project.assumptions.is_empty() {
+                    spec.assumptions = project.assumptions;
+                }
+            }
+            writeln!(out, "spec refined for {} project(s)", specs.len())?;
         }
 
         let plan = Plan {
@@ -645,6 +735,12 @@ impl App {
         }
         state.plan = Some(plan.clone());
         self.save_state(&state)?;
+        let _ = events::record(
+            &self.cfg,
+            "plan",
+            "",
+            &format!("{} project(s)", plan.specs.len()),
+        );
 
         writeln!(out)?;
         if let Some(host) = &plan.host {
@@ -750,6 +846,7 @@ impl App {
     }
 
     fn cmd_up(&mut self, opts: UpOptions, out: &mut dyn Write) -> Result<()> {
+        crate::shutdown::clear();
         self.ensure_layout()?;
         let _lock = self.up_lock()?;
         let mut state = self.load_state()?;
@@ -807,7 +904,35 @@ impl App {
             bail!("the plan has no projects");
         }
 
-        if opts.retry_failed {
+        if !opts.force {
+            let mut skipped = Vec::new();
+            specs.retain(|spec| {
+                let blocked = state
+                    .project(&spec.slug)
+                    .map(|p| {
+                        p.attempts >= self.cfg.max_attempts
+                            && matches!(p.status, ProjectStatus::Failed | ProjectStatus::Stopped)
+                    })
+                    .unwrap_or(false);
+                if blocked {
+                    skipped.push(spec.slug.clone());
+                }
+                !blocked
+            });
+            for slug in skipped {
+                writeln!(
+                    out,
+                    "  {slug}: max attempts ({}) reached; pass --force to retry",
+                    self.cfg.max_attempts
+                )?;
+            }
+            if specs.is_empty() {
+                writeln!(out, "no runnable project left (max attempts or filters)")?;
+                return Ok(());
+            }
+        }
+
+        if opts.retry_failed && !opts.no_run && !self.dry_run {
             for spec in &specs {
                 if let Some(project) = state.project(&spec.slug) {
                     if project.attempts > 0 {
@@ -1324,6 +1449,41 @@ impl App {
                 )?;
             }
         } else if !local_specs.is_empty() && !crate::shutdown::requested() {
+            let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let watchdog_msg = Arc::new(std::sync::Mutex::new(None::<String>));
+            let watchdog = if self.cfg.disk_watchdog_secs > 0 {
+                let cfg = self.cfg.clone();
+                let runner = self.runner.clone();
+                let stop = watchdog_stop.clone();
+                let msg = watchdog_msg.clone();
+                Some(std::thread::spawn(move || {
+                    let probe = DfProbe::new(runner.as_ref());
+                    loop {
+                        for _ in 0..cfg.disk_watchdog_secs {
+                            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                        }
+                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
+                        if let Ok(free) = probe.free_mb(&cfg.projects_root_path()) {
+                            if free < cfg.min_free_disk_mb {
+                                *msg.lock().unwrap() = Some(format!(
+                                    "disk watchdog stopped local agents: {} free < {} floor",
+                                    human_mb(free),
+                                    human_mb(cfg.min_free_disk_mb)
+                                ));
+                                crate::shutdown::request_disk();
+                                return;
+                            }
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
             let outcomes =
                 runner::execute_pool(self.runner.as_ref(), &self.cfg, runs, effective, &slots);
             for outcome in outcomes {
@@ -1343,8 +1503,18 @@ impl App {
                 };
                 if outcome.output.cancelled {
                     project.status = ProjectStatus::Stopped;
-                    project.last_error = Some("cancelled by user (SIGINT/SIGTERM)".to_string());
-                    writeln!(out, "  {}: stopped by user", outcome.slug)?;
+                    project.last_error = Some(match crate::shutdown::reason() {
+                        crate::shutdown::StopReason::Disk => {
+                            "stopped by disk watchdog: free space below floor".to_string()
+                        }
+                        _ => "cancelled by user (SIGINT/SIGTERM)".to_string(),
+                    });
+                    writeln!(
+                        out,
+                        "  {}: stopped ({})",
+                        outcome.slug,
+                        project.last_error.as_deref().unwrap_or("")
+                    )?;
                 } else {
                     match verification {
                         Some(verification) if verification.reason().is_none() => {
@@ -1359,6 +1529,9 @@ impl App {
                             )?;
                             if let Some(note) = &verification.unverified {
                                 writeln!(out, "    note: {note}")?;
+                            }
+                            if self.cfg.reflect_after_run {
+                                self.write_auto_reflection(&outcome.slug, out)?;
                             }
                         }
                         Some(verification) => {
@@ -1379,7 +1552,17 @@ impl App {
                         }
                     }
                 }
+                let status = project.status.as_str().to_string();
+                let slug = project.slug.clone();
                 state.upsert(project);
+                let _ = events::record(&self.cfg, "run", &slug, &status);
+            }
+            watchdog_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(watchdog) = watchdog {
+                let _ = watchdog.join();
+                if let Some(message) = watchdog_msg.lock().unwrap().take() {
+                    writeln!(out, "\n{message}")?;
+                }
             }
             self.save_state(&state)?;
         }
@@ -1630,6 +1813,76 @@ impl App {
         Ok(())
     }
 
+    fn cmd_project_adopt(
+        &mut self,
+        path: &Path,
+        slug_override: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        self.ensure_layout()?;
+        let _lock = self.up_lock()?;
+        let root = self.cfg.projects_root_path();
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        if !path.is_dir() {
+            bail!("not a directory: {}", path.display());
+        }
+        if !crate::util::is_inside(&root, &path) {
+            bail!(
+                "adopt only supports directories inside {} (move it there first)",
+                display_path(&root)
+            );
+        }
+        let slug = match slug_override {
+            Some(slug) => crate::util::slugify(slug),
+            None => path
+                .file_name()
+                .map(|n| crate::util::slugify(&n.to_string_lossy()))
+                .unwrap_or_else(|| "project".to_string()),
+        };
+        if slug == "project" {
+            bail!("could not derive a slug; pass --slug");
+        }
+        if root.join(&slug) != path {
+            bail!("--slug must match the directory name for adopt");
+        }
+        let mut state = self.load_state()?;
+        if state.project(&slug).is_some() {
+            bail!("project `{slug}` already exists in state");
+        }
+        let mut plan = self.load_plan().unwrap_or_default();
+        let idea = crate::model::Idea {
+            title: Some(slug.clone()),
+            details: format!("Adopted existing workspace at {}", path.display()),
+            raw: String::new(),
+        };
+        let mut spec = crate::model::ProjectSpec::from_idea(&idea, slug.clone());
+        spec.milestones = crate::milestones::fallback_for(&spec);
+        if plan.get(&slug).is_none() {
+            plan.specs.push(spec.clone());
+            plan.created_at = now_rfc3339();
+            plan.source = plan.source.clone();
+            state::save_plan(&self.cfg.plan_file(), &plan)?;
+        }
+        let scaffolding = scaffold_project(&self.cfg, &spec)?;
+        let mut project =
+            ProjectState::new(&slug, &spec.title, &scaffolding.path.display().to_string());
+        project.status = ProjectStatus::Scaffolded;
+        state.upsert(project);
+        state.plan = Some(plan);
+        self.save_state(&state)?;
+        writeln!(
+            out,
+            "adopted {slug} -> {} ({} new file(s))",
+            display_path(&scaffolding.path),
+            scaffolding.created.len()
+        )?;
+        Ok(())
+    }
+
     fn cmd_project_archive(&mut self, slug: &str, out: &mut dyn Write) -> Result<()> {
         self.ensure_layout()?;
         let mut state = self.load_state()?;
@@ -1688,8 +1941,9 @@ impl App {
             checks::oneline(&checks, now),
             state.projects.len()
         ));
-        report.push_str("| project | status | target | milestone | eta | attempts | repo |\n");
-        report.push_str("|---|---|---|---|---|---|---|\n");
+        report
+            .push_str("| project | status | target | milestone | eta | attempts | size | repo |\n");
+        report.push_str("|---|---|---|---|---|---|---|---|\n");
         for project in state.ordered() {
             let dir = PathBuf::from(&project.path);
             let board = milestones::load_optional(&milestones::board_path(&dir));
@@ -1700,8 +1954,9 @@ impl App {
                 }
                 None => ("-".to_string(), "-".to_string()),
             };
+            let size = dir_size_bytes(Path::new(&project.path));
             report.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 project.slug,
                 project.status.as_str(),
                 if project.target.is_empty() {
@@ -1712,6 +1967,7 @@ impl App {
                 progress,
                 eta,
                 project.attempts,
+                human_mb(size / (1024 * 1024)),
                 project.repo_url
             ));
             if let Some(error) = &project.last_error {
@@ -1775,6 +2031,33 @@ impl App {
         Ok(())
     }
 
+    fn write_auto_reflection(&mut self, slug: &str, out: &mut dyn Write) -> Result<()> {
+        let plan = self.load_plan()?;
+        let spec = plan
+            .get(slug)
+            .with_context(|| format!("unknown project `{slug}`"))?
+            .clone();
+        let dir = self.cfg.projects_root_path().join(slug);
+        let status = std::fs::read_to_string(dir.join("STATUS.md")).unwrap_or_default();
+        let log = tail_lines(&runner::log_path(&self.cfg, slug), 60)?.join("\n");
+        let reply = self.brain.think(
+            &prompts::reflection_prompt(&spec, &status, &log),
+            self.cfg.brain_timeout_secs,
+        )?;
+        let path = self
+            .cfg
+            .internal_dir()
+            .join("reflections")
+            .join(format!("{slug}.md"));
+        crate::util::ensure_dir_private(path.parent().unwrap())?;
+        crate::util::write_private(
+            &path,
+            format!("# Reflection\n\n_Generated {}_\n\n{reply}\n", now_rfc3339()),
+        )?;
+        writeln!(out, "  reflection: {}", display_path(&path))?;
+        Ok(())
+    }
+
     fn cmd_reflect(&mut self, slug: &str, lines: usize, out: &mut dyn Write) -> Result<()> {
         let plan = self.load_plan()?;
         let spec = plan
@@ -1811,6 +2094,7 @@ impl App {
         apply: bool,
         all: bool,
         force: bool,
+        logs_older_than_days: Option<u64>,
         out: &mut dyn Write,
     ) -> Result<()> {
         self.ensure_layout()?;
@@ -1820,10 +2104,17 @@ impl App {
             None
         };
         let report = clean::scan(&self.cfg);
-        if report.project_entries.is_empty() && report.internal_entries.is_empty() {
+        if report.project_entries.is_empty()
+            && report.internal_entries.is_empty()
+            && logs_older_than_days.is_none()
+        {
             writeln!(out, "nothing to clean")?;
             return Ok(());
         }
+        let old_logs = logs_older_than_days
+            .map(|days| self.old_logs(days, out))
+            .transpose()?
+            .unwrap_or_default();
         writeln!(out, "{:<6} {:>10}  path", "kind", "size")?;
         for entry in &report.project_entries {
             let label = match entry.kind {
@@ -1886,6 +2177,72 @@ impl App {
         }
         let removed = clean::apply(&self.cfg, &report, all)?;
         writeln!(out, "removed {} path(s)", removed.len())?;
+        let mut log_count = 0usize;
+        for path in old_logs {
+            if std::fs::remove_file(&path).is_ok() {
+                log_count += 1;
+            }
+        }
+        if logs_older_than_days.is_some() {
+            writeln!(out, "removed {log_count} old log/prompt file(s)")?;
+        }
+        Ok(())
+    }
+
+    fn old_logs(&self, days: u64, out: &mut dyn Write) -> Result<Vec<PathBuf>> {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(days.saturating_mul(86_400)));
+        let Some(cutoff) = cutoff else {
+            return Ok(Vec::new());
+        };
+        let mut old = Vec::new();
+        let entries = match std::fs::read_dir(self.cfg.logs_dir()) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(Vec::new()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::now());
+            if modified >= cutoff {
+                continue;
+            }
+            writeln!(out, "old log  {}", display_path(&path))?;
+            old.push(path);
+        }
+        Ok(old)
+    }
+
+    fn cmd_completions(&mut self, shell: &str, out: &mut dyn Write) -> Result<()> {
+        let commands = "init doctor plan up status logs reflect clean stop check milestone stats notify vps ideas bot events report project completions";
+        match shell {
+            "bash" => write!(
+                out,
+                "_mox() {{\n  local cur=\"${{COMP_WORDS[COMP_CWORD]}}\"\n  if [ \"$COMP_CWORD\" -eq 1 ]; then\n    COMPREPLY=( $(compgen -W \"{commands}\" -- \"$cur\") )\n  fi\n}}\ncomplete -F _mox mox\n"
+            )?,
+            "zsh" => write!(
+                out,
+                "#compdef mox\n_mox() {{\n  _arguments '1:command:({commands})'\n}}\ncompdef _mox mox\n"
+            )?,
+            "fish" => {
+                for command in commands.split_whitespace() {
+                    writeln!(out, "complete -c mox -f -a {command}")?;
+                }
+            }
+            _ => bail!("unsupported shell `{shell}`"),
+        }
+        Ok(())
+    }
+
+    fn cmd_events(&mut self, tail: usize, out: &mut dyn Write) -> Result<()> {
+        for line in events::tail(&self.cfg, tail) {
+            writeln!(out, "{line}")?;
+        }
         Ok(())
     }
 
@@ -2055,6 +2412,8 @@ impl App {
                 kind,
                 priority,
                 detail,
+                every,
+                probe,
             }) => {
                 if title.trim().is_empty() {
                     bail!("check title must not be empty");
@@ -2065,9 +2424,17 @@ impl App {
                     .parse()
                     .map_err(|err: String| anyhow::anyhow!(err))?;
                 let due_at = checks::parse_due(due.as_deref().unwrap_or(""), now)?;
-                let check = Check::new(&slug, title.trim(), kind, priority, due_at, detail, now);
+                let mut check =
+                    Check::new(&slug, title.trim(), kind, priority, due_at, detail, now);
+                if let Some(every) = every {
+                    check.every_secs = Some(checks::parse_span(&every)?);
+                }
+                check.probe = probe
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty());
                 let id = store.add(check);
                 checks::save(&self.cfg.checks_file(), &store)?;
+                let _ = events::record(&self.cfg, "check", &slug, &format!("added {id}"));
                 let added = store.get(&id).expect("just added");
                 writeln!(
                     out,
@@ -2082,6 +2449,7 @@ impl App {
             Some(CheckAction::Done { id, note }) => {
                 store.mark_done(&id, &note, now)?;
                 checks::save(&self.cfg.checks_file(), &store)?;
+                let _ = events::record(&self.cfg, "check", "", &format!("done {id}"));
                 let check = store.get(&id).expect("just marked done");
                 writeln!(
                     out,
@@ -2100,6 +2468,7 @@ impl App {
                 let due = checks::parse_due(&when, now)?;
                 store.reschedule(&id, due, now)?;
                 checks::save(&self.cfg.checks_file(), &store)?;
+                let _ = events::record(&self.cfg, "check", "", &format!("later {id}"));
                 let check = store.get(&id).expect("just rescheduled");
                 writeln!(
                     out,
@@ -2120,6 +2489,15 @@ impl App {
                     outcome.created,
                     outcome.updated,
                     store.open().len()
+                )?;
+            }
+            Some(CheckAction::Probe { slug }) => {
+                let failures = self.probe_store(&mut store, slug.as_deref(), now, out)?;
+                checks::save(&self.cfg.checks_file(), &store)?;
+                writeln!(
+                    out,
+                    "probed {} check(s), {failures} failure(s)",
+                    store.open().iter().filter(|c| c.probe.is_some()).count()
                 )?;
             }
             Some(CheckAction::Remove { id }) => {
@@ -2204,8 +2582,117 @@ impl App {
                         "{}",
                         checks::render_limited(&store, now, opts.all, opts.top)
                     )?;
+                    if opts.context {
+                        self.print_check_context(&store, now, opts.top, out)?;
+                    }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Run probes in the store and mark failures due now.
+    fn probe_store(
+        &self,
+        store: &mut CheckStore,
+        slug: Option<&str>,
+        now: chrono::DateTime<Utc>,
+        out: &mut dyn Write,
+    ) -> Result<usize> {
+        let indices: Vec<usize> = store
+            .checks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.status == checks::CheckStatus::Open
+                    && c.probe.is_some()
+                    && slug.map(|s| c.slug == s).unwrap_or(true)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let mut failures = 0usize;
+        for index in indices {
+            let probe = store.checks[index].probe.clone().unwrap_or_default();
+            let result = checks::run_probe(self.runner.as_ref(), &self.cfg, &probe);
+            let check = &mut store.checks[index];
+            check.probe_at = Some(now);
+            match result {
+                Ok(result) => {
+                    check.probe_note = Some(format!(
+                        "{}: {}",
+                        if result.ok { "ok" } else { "FAILED" },
+                        result.observed
+                    ));
+                    if !result.ok {
+                        failures += 1;
+                        check.due_at = Some(now);
+                        if check.priority < checks::Priority::High {
+                            check.priority = checks::Priority::High;
+                        }
+                    }
+                    writeln!(
+                        out,
+                        "{} [{}] {} — {}",
+                        check.id,
+                        check.slug,
+                        check.title,
+                        check.probe_note.as_deref().unwrap_or("")
+                    )?;
+                }
+                Err(err) => {
+                    failures += 1;
+                    check.probe_note = Some(format!("error: {err:#}"));
+                    check.due_at = Some(now);
+                    writeln!(out, "{} [{}] probe error: {err:#}", check.id, check.slug)?;
+                }
+            }
+            check.updated_at = now;
+        }
+        Ok(failures)
+    }
+
+    fn print_check_context(
+        &self,
+        store: &CheckStore,
+        now: chrono::DateTime<Utc>,
+        top: Option<usize>,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        let state = self.load_state()?;
+        let mut commits: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut items = checks::ordered_open(store, now);
+        if let Some(top) = top {
+            items.truncate(top);
+        }
+        for (check, _) in items {
+            let Some(project) = state.project(&check.slug) else {
+                continue;
+            };
+            let commit = commits
+                .entry(check.slug.clone())
+                .or_insert_with(|| {
+                    let output = self.runner.run(
+                        &CommandSpec::new(&self.cfg.git_bin)
+                            .args(["rev-parse", "--short", "HEAD"])
+                            .cwd(&project.path)
+                            .timeout(10),
+                    );
+                    output
+                        .ok()
+                        .filter(|o| o.success())
+                        .map(|o| o.stdout.trim().to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                })
+                .clone();
+            writeln!(
+                out,
+                "  {} {} @ {} ({})",
+                check.id,
+                display_path(Path::new(&project.path)),
+                commit,
+                check.slug
+            )?;
         }
         Ok(())
     }
@@ -2404,7 +2891,28 @@ impl App {
         Ok(())
     }
 
-    fn cmd_vps_sync(&mut self, slug: Option<&str>, out: &mut dyn Write) -> Result<()> {
+    fn cmd_vps_sync(
+        &mut self,
+        slug: Option<&str>,
+        watch: bool,
+        interval: u64,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        loop {
+            self.cmd_vps_sync_once(slug, out)?;
+            if !watch || crate::shutdown::requested() {
+                return Ok(());
+            }
+            out.flush()?;
+            let mut slept = 0u64;
+            while slept < interval.max(5) && !crate::shutdown::requested() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                slept += 1;
+            }
+        }
+    }
+
+    fn cmd_vps_sync_once(&mut self, slug: Option<&str>, out: &mut dyn Write) -> Result<()> {
         self.ensure_layout()?;
         let _lock = self.up_lock()?;
         let mut state = self.load_state()?;
@@ -2508,8 +3016,10 @@ impl App {
                         ),
                         out,
                     );
+                    let status = project.status.as_str().to_string();
                     state.upsert(project);
                     self.save_state(&state)?;
+                    let _ = events::record(&self.cfg, "remote", &slug, &status);
                 }
                 Err(err) => {
                     writeln!(out, "{slug}: could not poll remote: {err:#}")?;
@@ -2833,8 +3343,14 @@ mod tests {
         let mut app = temp_app(dir.path());
         write_plan(&app, vec![spec("demo")]);
         let mut out = Vec::new();
-        app.cmd_plan(None, None, false, true, false, &mut out)
-            .unwrap();
+        app.cmd_plan(
+            PlanOptions {
+                yes: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("demo"));
         assert!(app.cfg.answers_file().exists());
@@ -2854,8 +3370,15 @@ mod tests {
         let ideas = dir.path().join("ideas.txt");
         std::fs::write(&ideas, "- Expense tracker :: track my expenses\n").unwrap();
         let mut out = Vec::new();
-        app.cmd_plan(Some(ideas), None, false, true, false, &mut out)
-            .unwrap();
+        app.cmd_plan(
+            PlanOptions {
+                ideas: Some(ideas),
+                yes: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("expense"));
         assert!(text.contains("estimates for:"), "{text}");
@@ -2873,6 +3396,41 @@ mod tests {
     }
 
     #[test]
+    fn plan_deep_refines_the_spec_from_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(crate::notify::RecordingNotifier::default());
+        let mut app = temp_app(dir.path()).with_notifier(rec);
+        let brain = Arc::new(ScriptedBrain::new(vec![
+            r#"{"projects":[{"slug":"expense","title":"Expense","summary":"old",
+                "questions":[{"id":"q1","question":"Which DB?","default":"SQLite"}]}]}"#
+                .to_string(),
+            r#"{"projects":[{"slug":"expense","summary":"refined summary",
+                "acceptance_criteria":["works end to end"],"risks":["scope"],
+                "assumptions":["single user"]}]}"#
+                .to_string(),
+        ]));
+        app.brain = brain.clone();
+        let ideas = dir.path().join("ideas.txt");
+        std::fs::write(&ideas, "- Expense\n").unwrap();
+        let mut out = Vec::new();
+        app.cmd_plan(
+            PlanOptions {
+                ideas: Some(ideas),
+                yes: true,
+                deep: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let saved = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        assert_eq!(saved.specs[0].summary, "refined summary");
+        assert_eq!(saved.specs[0].acceptance_criteria, vec!["works end to end"]);
+        assert_eq!(saved.specs[0].risks, vec!["scope"]);
+        assert_eq!(brain.prompts().len(), 2);
+    }
+
+    #[test]
     fn plan_applies_existing_answers_and_asks_interactively() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = temp_app(dir.path());
@@ -2887,8 +3445,15 @@ mod tests {
         let ideas = dir.path().join("ideas.txt");
         std::fs::write(&ideas, "- Expense\n").unwrap();
         let mut out = Vec::new();
-        app.cmd_plan(Some(ideas), None, false, false, true, &mut out)
-            .unwrap();
+        app.cmd_plan(
+            PlanOptions {
+                ideas: Some(ideas),
+                interactive: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
         let saved = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
         assert_eq!(saved.specs[0].answers["q1"], "PostgreSQL");
         // q2 had no scripted answer but a default, so the default was used.
@@ -3041,7 +3606,7 @@ mod tests {
         assert!(text.contains("detached on VPS"), "{text}");
 
         let mut out = Vec::new();
-        app.cmd_vps_sync(None, &mut out).unwrap();
+        app.cmd_vps_sync(None, false, 60, &mut out).unwrap();
         let state = state::load(&app.cfg.state_file()).unwrap();
         let project = state.project("demo").unwrap();
         assert_eq!(project.status, ProjectStatus::Completed);
@@ -3093,8 +3658,9 @@ mod tests {
             .iter()
             .find(|d| d.contains("kill -TERM"))
             .expect("cleanup command");
-        assert!(cleanup.contains("200 300"), "{cleanup}");
-        assert!(!cleanup.contains("100"), "{cleanup}");
+        assert!(cleanup.contains("200"), "{cleanup}");
+        assert!(cleanup.contains("300"), "{cleanup}");
+        assert!(!cleanup.contains(" 100 "), "{cleanup}");
     }
 
     #[test]
@@ -3663,6 +4229,7 @@ mod tests {
                 all,
                 no_sync,
                 top: None,
+                context: false,
             },
             &mut out,
         );
@@ -3778,6 +4345,8 @@ mod tests {
                 kind: "vps".into(),
                 priority: "high".into(),
                 detail: "check systemctl and logs".into(),
+                every: None,
+                probe: None,
             }),
             false,
             false,
@@ -3852,6 +4421,84 @@ mod tests {
 
         let (sync, _) = call_check(&mut app, Some(CheckAction::Sync), false, false, false, true);
         assert!(sync.contains("0 new check(s), 1 refreshed"), "{sync}");
+    }
+
+    #[test]
+    fn check_probe_and_context_are_wired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let mut store = checks::CheckStore::default();
+        let id = store.add(
+            Check::new(
+                "demo",
+                "Verify cron",
+                CheckKind::Vps,
+                Priority::Normal,
+                Some(Utc::now()),
+                "",
+                Utc::now(),
+            )
+            .with_probe(Some("systemctl is-active fetcher".into())),
+        );
+        checks::save(&app.cfg.checks_file(), &store).unwrap();
+
+        app.runner = Arc::new(FakeRunner::new(|spec| {
+            if spec.program == "ssh" {
+                let command = spec.args.last().cloned().unwrap_or_default();
+                if command.contains("systemctl is-active") {
+                    return crate::exec::Output {
+                        code: Some(0),
+                        stdout: "active\n".into(),
+                        ..crate::exec::Output::default()
+                    };
+                }
+            }
+            if spec.program == "git" && spec.args.contains(&"rev-parse".to_string()) {
+                return crate::exec::Output {
+                    code: Some(0),
+                    stdout: "abc1234\n".into(),
+                    ..crate::exec::Output::default()
+                };
+            }
+            crate::exec::Output::ok()
+        }));
+        let mut out = Vec::new();
+        app.cmd_check(
+            Some(CheckAction::Probe { slug: None }),
+            CheckOptions {
+                no_sync: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("probed 1 check"), "{text}");
+        let stored = checks::load(&app.cfg.checks_file()).unwrap();
+        assert!(stored
+            .get(&id)
+            .unwrap()
+            .probe_note
+            .as_deref()
+            .unwrap()
+            .contains("ok"));
+
+        let mut out = Vec::new();
+        app.cmd_check(
+            None,
+            CheckOptions {
+                no_sync: true,
+                context: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("abc1234"), "{text}");
+        assert!(text.contains("demo"), "{text}");
     }
 
     #[test]
@@ -3969,6 +4616,25 @@ mod tests {
     }
 
     #[test]
+    fn project_adopt_registers_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let path = app.cfg.projects_root_path().join("legacy");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep.txt"), "x").unwrap();
+        let mut out = Vec::new();
+        app.cmd_project_adopt(&path, None, &mut out).unwrap();
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        assert!(state.project("legacy").is_some());
+        assert!(path.join("MILESTONES.json").exists());
+        assert!(path.join("TASKS.md").exists());
+        let plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        assert!(plan.get("legacy").is_some());
+        assert!(String::from_utf8(out).unwrap().contains("adopted legacy"));
+    }
+
+    #[test]
     fn project_archive_moves_the_workspace_without_deleting_anything() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = temp_app(dir.path());
@@ -3996,6 +4662,82 @@ mod tests {
         assert!(String::from_utf8(out)
             .unwrap()
             .contains("GitHub repository is untouched"));
+    }
+
+    #[test]
+    fn init_profiles_and_completions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        let mut out = Vec::new();
+        app.cmd_init(false, "paranoid", &mut out).unwrap();
+        let cfg = Config::load(Some(&app.cfg_path)).unwrap();
+        assert_eq!(cfg.max_parallel, 1);
+        assert!(!cfg.auto_approve);
+        assert_eq!(cfg.min_free_disk_mb, 4096);
+
+        let mut out = Vec::new();
+        app.cmd_completions("bash", &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("complete -F _mox mox"), "{text}");
+        let mut out = Vec::new();
+        app.cmd_completions("fish", &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("complete -c mox"));
+    }
+
+    #[test]
+    fn events_command_and_log_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        events::record(&app.cfg, "test", "demo", "hello").unwrap();
+        let mut out = Vec::new();
+        app.cmd_events(5, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("hello"));
+
+        let log = app.cfg.logs_dir().join("old.log");
+        std::fs::write(&log, "old").unwrap();
+        let status = std::process::Command::new("touch")
+            .args(["-d", "40 days ago"])
+            .arg(&log)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut out = Vec::new();
+        app.cmd_clean(false, false, false, Some(30), &mut out)
+            .unwrap();
+        assert!(log.exists());
+        assert!(String::from_utf8(out).unwrap().contains("old log"));
+        app.cmd_clean(true, false, false, Some(30), &mut Vec::new())
+            .unwrap();
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn max_attempts_blocks_a_retry_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        write_plan(&app, vec![spec("demo")]);
+        let mut state = State::default();
+        let mut project = ProjectState::new("demo", "Demo", "/tmp/demo");
+        project.status = ProjectStatus::Failed;
+        project.attempts = app.cfg.max_attempts;
+        state.upsert(project);
+        app.save_state(&state).unwrap();
+        let mut out = Vec::new();
+        app.cmd_up(
+            UpOptions {
+                retry_failed: true,
+                no_github: true,
+                no_run: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("max attempts"), "{text}");
+        let state = state::load(&app.cfg.state_file()).unwrap();
+        assert_eq!(state.projects["demo"].status, ProjectStatus::Failed);
     }
 
     #[test]
@@ -4033,6 +4775,8 @@ mod tests {
                 kind: "manual".into(),
                 priority: "normal".into(),
                 detail: String::new(),
+                every: None,
+                probe: None,
             }),
             false,
             false,
@@ -4050,6 +4794,8 @@ mod tests {
                 kind: "nope".into(),
                 priority: "normal".into(),
                 detail: String::new(),
+                every: None,
+                probe: None,
             }),
             false,
             false,
@@ -4100,13 +4846,50 @@ mod tests {
         let ideas = dir.path().join("ideas.txt");
         std::fs::write(&ideas, "- Expense\n").unwrap();
         let mut out = Vec::new();
-        app.cmd_plan(Some(ideas), None, false, true, false, &mut out)
-            .unwrap();
+        app.cmd_plan(
+            PlanOptions {
+                ideas: Some(ideas),
+                yes: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
         let events = rec.events();
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].kind, EventKind::Questions);
         assert!(events[0].title.contains("1 question"));
         assert!(events[0].body.contains("expense"));
+    }
+
+    #[test]
+    fn auto_reflection_is_written_under_mox() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.cfg.reflect_after_run = true;
+        app.brain = Arc::new(ScriptedBrain::new(vec![
+            "## What was achieved\nnothing".to_string()
+        ]));
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(
+            UpOptions {
+                no_github: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let path = app.cfg.internal_dir().join("reflections/demo.md");
+        assert!(path.exists(), "missing {}", path.display());
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("What was achieved"));
+        assert!(!app
+            .cfg
+            .projects_root_path()
+            .join("demo/REFLECTION.md")
+            .exists());
     }
 
     #[test]
@@ -4443,7 +5226,7 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("x"), b"12345").unwrap();
         let mut out = Vec::new();
-        app.cmd_clean(false, false, false, &mut out).unwrap();
+        app.cmd_clean(false, false, false, None, &mut out).unwrap();
         assert!(cache.exists());
         assert!(String::from_utf8(out).unwrap().contains("dry run"));
     }
@@ -4457,7 +5240,7 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("x"), b"12345").unwrap();
         let mut out = Vec::new();
-        app.cmd_clean(true, false, false, &mut out).unwrap();
+        app.cmd_clean(true, false, false, None, &mut out).unwrap();
         assert!(!cache.exists());
     }
 

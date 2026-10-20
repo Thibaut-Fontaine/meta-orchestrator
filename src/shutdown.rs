@@ -5,9 +5,36 @@
 //! app can save state and print a summary. This avoids orphaning agent
 //! processes.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static REQUESTED: AtomicBool = AtomicBool::new(false);
+static REASON: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    None,
+    User,
+    Disk,
+}
+
+pub fn reason() -> StopReason {
+    match REASON.load(Ordering::SeqCst) {
+        1 => StopReason::User,
+        2 => StopReason::Disk,
+        _ => StopReason::None,
+    }
+}
+
+pub fn request_disk() {
+    REASON.store(2, Ordering::SeqCst);
+    REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Reset state before a new command.
+pub fn clear() {
+    REQUESTED.store(false, Ordering::SeqCst);
+    REASON.store(0, Ordering::SeqCst);
+}
 
 pub fn requested() -> bool {
     REQUESTED.load(Ordering::SeqCst)
@@ -15,6 +42,7 @@ pub fn requested() -> bool {
 
 /// Test/helper hook; never used by production code.
 pub fn request() {
+    REASON.store(1, Ordering::SeqCst);
     REQUESTED.store(true, Ordering::SeqCst);
 }
 
@@ -44,11 +72,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flag_roundtrip() {
-        reset();
+    fn flag_roundtrip_and_reason() {
+        clear();
         assert!(!requested());
+        assert_eq!(reason(), StopReason::None);
         request();
         assert!(requested());
-        reset();
+        assert_eq!(reason(), StopReason::User);
+        request_disk();
+        assert_eq!(reason(), StopReason::Disk);
+        clear();
     }
 }
