@@ -1,0 +1,24 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: package
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          tar -czf "mox-${tag}-x86_64-unknown-linux-gnu.tar.gz" -C target/release mox
+          sha256sum "mox-${tag}-x86_64-unknown-linux-gnu.tar.gz" > "mox-${tag}.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mox-*.tar.gz
+            mox-*.sha256

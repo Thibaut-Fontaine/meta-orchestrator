@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.6.0** · 287 unit tests + 8 end-to-end tests · private repo,
+Status: **v0.7.0** · 294 unit tests + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -21,6 +21,7 @@ Status: **v0.6.0** · 287 unit tests + 8 end-to-end tests · private repo,
 | VPS execution | Explicit `--target vps`, one-time approval, rsync mirror, ssh run, git-bundle fetch-back, OVH checklist | ✅ code (VPS needs opencode + auth) |
 | Always-on remote | `--detach` starts a setsid run that survives the workstation; `mox vps sync` fetches progress/results | ✅ code |
 | Telegram bot | Read-only long-poll bot: projects, milestones, todos, checks, questions, ETA, logs, report | ✅ |
+| Remote ghost wall | Bot refuses remote context; `vps ps` audit + `vps cleanup`; detached pids recorded | ✅ |
 | Easy build | `./build.sh` (release, `--test`, `--debug`, `--install`, `--offline`) | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
@@ -260,8 +261,8 @@ its commits back on the workstation, with no secrets copied.
 Goal: predictable, observable, installable.
 
 - [x] RAM-aware admission (`MemAvailable / mem_per_agent_mb`). *(P2, M)*
-- [~] Per-project budget: wall-clock timeout, attempt counter and duration are
-      recorded; no token/cost ceiling yet. *(P2, M)*
+- [~] Per-project budget: wall-clock timeout, attempt counter, retry backoff and
+      duration are recorded; no token/cost ceiling yet. *(P2, M)*
 - [~] `mox report` with durations, failures and stats is implemented;
       `events.jsonl` and disk deltas are pending. *(P2, M)*
 - [ ] Disk watchdog during runs (check every N seconds; pause admission and warn
@@ -303,7 +304,8 @@ hooks, rolling pools, resume/retry, reports, CI, and remote VPS execution.
 Next, in this order:
 
 1. **Remote owner setup:** install `opencode` on the VPS and configure model
-   auth there; run `mox vps setup` until it is green.
+   auth there; run `mox vps setup` until it is green. This is intentionally
+   manual — mox never installs software or copies credentials to the VPS.
 2. **Planning second pass** from answers into a refined spec and `TASKS.md`.
 3. **Checks:** recurrence, VPS health probes, configurable timezone, project
    path/commit context.

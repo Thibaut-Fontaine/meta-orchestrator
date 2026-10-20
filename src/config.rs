@@ -50,6 +50,8 @@ pub struct Config {
     pub min_free_disk_mb: u64,
     /// Assumed RAM per running agent (admission control).
     pub mem_per_agent_mb: u64,
+    /// Base delay before retrying a failed project (doubles per attempt, max 60s).
+    pub retry_backoff_secs: u64,
     /// Soft budget per project, used by `status` and `clean`.
     pub project_disk_budget_mb: u64,
     /// Timeout for one brainstorming call.
@@ -70,6 +72,9 @@ pub struct Config {
     pub notify_desktop: bool,
     /// Telegram bot notifications. The token is read from an env var.
     pub notify_telegram: bool,
+    /// Hard wall: allow the mox Telegram bot to run on a remote/VPS host.
+    /// Default false; only set by a human who explicitly wants it.
+    pub allow_remote_bots: bool,
     pub telegram_chat_id: String,
     pub telegram_token_env: String,
     /// Generic JSON webhook notifications.
@@ -99,6 +104,7 @@ impl Default for Config {
             nice_level: 10,
             min_free_disk_mb: 2048,
             mem_per_agent_mb: 768,
+            retry_backoff_secs: 5,
             project_disk_budget_mb: 4096,
             brain_timeout_secs: 900,
             run_timeout_secs: 7200,
@@ -110,6 +116,7 @@ impl Default for Config {
             extra_instructions: String::new(),
             notify_desktop: false,
             notify_telegram: false,
+            allow_remote_bots: false,
             telegram_chat_id: String::new(),
             telegram_token_env: "MOX_TELEGRAM_TOKEN".to_string(),
             notify_webhook: false,
@@ -195,6 +202,11 @@ impl Config {
                 self.reserve_cores = n;
             }
         }
+        if let Some(v) = var("MOX_RETRY_BACKOFF_SECS") {
+            if let Ok(n) = v.parse() {
+                self.retry_backoff_secs = n;
+            }
+        }
         if let Some(v) = var("MOX_MIN_FREE_DISK_MB") {
             if let Ok(n) = v.parse() {
                 self.min_free_disk_mb = n;
@@ -210,6 +222,9 @@ impl Config {
         }
         if let Some(v) = var("MOX_AUTO_APPROVE") {
             self.auto_approve = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = var("MOX_ALLOW_REMOTE_BOTS") {
+            self.allow_remote_bots = matches!(v.as_str(), "1" | "true" | "yes" | "on");
         }
         if let Some(v) = var("MOX_STANDALONE") {
             self.standalone = matches!(v.as_str(), "1" | "true" | "yes" | "on");
@@ -339,6 +354,7 @@ nice_level = {nice_level}
 # Disk safety. Work refuses to start below min_free_disk_mb.
 min_free_disk_mb = {min_free_disk_mb}
 mem_per_agent_mb = {mem_per_agent_mb}
+retry_backoff_secs = {retry_backoff_secs}
 project_disk_budget_mb = {project_disk_budget_mb}
 
 # Timeouts.
@@ -355,6 +371,7 @@ extra_instructions = {extra_instructions:?}
 #   export MOX_TELEGRAM_TOKEN=...   (from @BotFather)
 notify_desktop = {notify_desktop}
 notify_telegram = {notify_telegram}
+allow_remote_bots = {allow_remote_bots}
 telegram_chat_id = {telegram_chat_id:?}
 telegram_token_env = {telegram_token_env:?}
 notify_webhook = {notify_webhook}
@@ -379,6 +396,7 @@ webhook_url = {webhook_url:?}
             nice_level = self.nice_level,
             min_free_disk_mb = self.min_free_disk_mb,
             mem_per_agent_mb = self.mem_per_agent_mb,
+            retry_backoff_secs = self.retry_backoff_secs,
             project_disk_budget_mb = self.project_disk_budget_mb,
             brain_timeout_secs = self.brain_timeout_secs,
             run_timeout_secs = self.run_timeout_secs,
@@ -388,6 +406,7 @@ webhook_url = {webhook_url:?}
             extra_instructions = self.extra_instructions,
             notify_desktop = self.notify_desktop,
             notify_telegram = self.notify_telegram,
+            allow_remote_bots = self.allow_remote_bots,
             telegram_chat_id = self.telegram_chat_id,
             telegram_token_env = self.telegram_token_env,
             notify_webhook = self.notify_webhook,

@@ -23,6 +23,15 @@ use std::time::Duration;
 
 const MAX_MESSAGE: usize = 3800;
 
+/// True when this process looks like it runs on a remote/VPS checkout.
+/// `mox bot` refuses in this context unless a human explicitly allows it.
+pub fn remote_context(cwd: &Path) -> bool {
+    if std::env::var("MOX_REMOTE_RUN").is_ok() {
+        return true;
+    }
+    cwd.join(".mox/remote.owner").exists() || cwd.to_string_lossy().contains("/mox-remote/")
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reply {
     pub text: String,
@@ -940,6 +949,16 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.chars().count() <= MAX_MESSAGE));
+    }
+
+    #[test]
+    fn detects_remote_context() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!remote_context(dir.path()));
+        std::fs::create_dir_all(dir.path().join(".mox")).unwrap();
+        std::fs::write(dir.path().join(".mox/remote.owner"), "demo\n").unwrap();
+        assert!(remote_context(dir.path()));
+        assert!(remote_context(Path::new("/home/u/mox-remote/demo")));
     }
 
     #[test]

@@ -37,6 +37,129 @@ impl std::str::FromStr for Target {
 }
 
 /// Result of one remote run.
+/// A process found on the VPS that looks like a mox/agent process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteProcess {
+    pub pid: u32,
+    pub ppid: u32,
+    pub etimes: u64,
+    pub args: String,
+    /// True when the pid is recorded in local state as a live detached run.
+    pub tracked: bool,
+}
+
+impl RemoteProcess {
+    /// A process that mox did not start or lost track of. `mox bot` is always
+    /// suspicious: mox must never launch bots remotely.
+    pub fn is_ghost(&self) -> bool {
+        !self.tracked
+    }
+
+    pub fn is_bot(&self) -> bool {
+        command_launches_bot(&self.args)
+    }
+}
+
+/// Commands that must never be launched by mox on a remote host.
+pub fn command_launches_bot(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("mox bot")
+        || lower.contains("mox notify daemon")
+        || lower.contains("mox check daemon")
+}
+
+pub fn ps_spec(cfg: &Config, alias: &str) -> CommandSpec {
+    ssh_spec(
+        cfg,
+        alias,
+        "ps -eo pid=,ppid=,etimes=,args= | grep -E 'mox-remote|mox bot|mox notify daemon|mox check daemon' | grep -v grep || true",
+        30,
+    )
+}
+
+pub fn parse_ps(stdout: &str, tracked: &[u32]) -> Vec<RemoteProcess> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse().ok()?;
+            let ppid = parts.next()?.parse().ok()?;
+            let etimes = parts.next()?.parse().ok()?;
+            let args = parts.collect::<Vec<_>>().join(" ");
+            if args.is_empty() {
+                return None;
+            }
+            Some(RemoteProcess {
+                pid,
+                ppid,
+                etimes,
+                args,
+                tracked: tracked.contains(&pid),
+            })
+        })
+        .collect()
+}
+
+pub fn audit(
+    runner: &dyn CommandRunner,
+    cfg: &Config,
+    alias: &str,
+    state: &crate::state::State,
+) -> Result<Vec<RemoteProcess>> {
+    let tracked: Vec<u32> = state
+        .projects
+        .values()
+        .filter_map(|p| p.remote_pid)
+        .collect();
+    let output = runner.run(&ps_spec(cfg, alias))?;
+    if !output.success() {
+        bail!("remote process audit failed: {}", output.tail(4));
+    }
+    Ok(parse_ps(&output.stdout, &tracked))
+}
+
+pub fn render_ps(procs: &[RemoteProcess]) -> String {
+    if procs.is_empty() {
+        return "no mox/agent process found on the VPS".to_string();
+    }
+    let mut out = String::from("pid    ppid   age      state   command\n");
+    for process in procs {
+        out.push_str(&format!(
+            "{:<6} {:<6} {:<8} {:<7} {}\n",
+            process.pid,
+            process.ppid,
+            crate::util::format_secs(process.etimes),
+            if process.tracked {
+                "tracked"
+            } else if process.is_bot() {
+                "BOT"
+            } else {
+                "GHOST"
+            },
+            crate::util::truncate_chars(&process.args, 140)
+        ));
+    }
+    out
+}
+
+/// Kill only explicitly listed ghost pids. Callers must verify they are
+/// untracked; this helper does not decide policy.
+pub fn cleanup_spec(cfg: &Config, alias: &str, pids: &[u32]) -> CommandSpec {
+    let list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    ssh_spec(
+        cfg,
+        alias,
+        &format!(
+            "kill -TERM {list} 2>/dev/null || true; sleep 2; kill -KILL {list} 2>/dev/null || true; echo cleaned"
+        ),
+        30,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteOutcome {
     pub output: Output,
@@ -175,7 +298,7 @@ pub fn detached_script(cfg: &Config, slug: &str, timeout_secs: u64) -> String {
          export PATH=\"$PWD/.mox/bin:$PATH\"\n\
          export TMPDIR=\"$PWD/.mox/tmp\" CARGO_TARGET_DIR=\"$PWD/.mox/cache/cargo-target\"\n\
          export npm_config_cache=\"$PWD/.mox/cache/npm\" PIP_CACHE_DIR=\"$PWD/.mox/cache/pip\"\n\
-         export GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1\n\
+         export GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1 MOX_REMOTE_RUN=1\n\
          export GIT_AUTHOR_NAME=mox GIT_AUTHOR_EMAIL=mox@localhost\n\
          export GIT_COMMITTER_NAME=mox GIT_COMMITTER_EMAIL=mox@localhost\n\
          nice -n 10 timeout {timeout_secs} {bin} run --auto --standalone \\\n\
@@ -191,9 +314,9 @@ pub fn write_prompt_spec(cfg: &Config, alias: &str, slug: &str, prompt: &str) ->
         cfg,
         alias,
         &format!(
-            "mkdir -p {}/.mox && printf %s '{encoded}' | base64 -d > {}/.mox/prompt.txt",
-            remote_dir(cfg, slug),
-            remote_dir(cfg, slug)
+            "mkdir -p {dir}/.mox && printf %s '{encoded}' | base64 -d > {dir}/.mox/prompt.txt && printf '%s\\n' '{slug}' > {dir}/.mox/remote.owner",
+            dir = remote_dir(cfg, slug),
+            slug = slug
         ),
         60,
     )
@@ -487,7 +610,7 @@ pub fn remote_run_spec(
         "cd {dir} && mkdir -p .mox && printf %s '{encoded}' | base64 -d > .mox/prompt.txt && \
          PATH=\"$PWD/.mox/bin:$PATH\" TMPDIR=\"$PWD/.mox/tmp\" CARGO_TARGET_DIR=\"$PWD/.mox/cache/cargo-target\" \
          npm_config_cache=\"$PWD/.mox/cache/npm\" PIP_CACHE_DIR=\"$PWD/.mox/cache/pip\" \
-         GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1 \
+         GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1 MOX_REMOTE_RUN=1 \
          GIT_AUTHOR_NAME=mox GIT_AUTHOR_EMAIL=mox@localhost \
          GIT_COMMITTER_NAME=mox GIT_COMMITTER_EMAIL=mox@localhost \
          nice -n 10 timeout {timeout_secs} {bin} run --auto --standalone \
@@ -711,6 +834,40 @@ mod tests {
         let displays = runner.displays();
         assert!(displays.iter().any(|d| d.contains("setsid nohup")));
         assert!(displays.iter().any(|d| d.contains(".mox/run.sh")));
+    }
+
+    #[test]
+    fn parses_remote_processes_and_flags_ghosts_and_bots() {
+        let fixture = "123 1 42 /bin/sh /home/u/mox-remote/demo/.mox/run.sh\n\
+                        456 1 7 mox bot --once\n\
+                        789 1 3 opencode run --auto\n";
+        let procs = parse_ps(fixture, &[123]);
+        assert_eq!(procs.len(), 3);
+        assert!(procs[0].tracked);
+        assert!(!procs[0].is_ghost());
+        assert!(procs[1].is_ghost());
+        assert!(procs[1].is_bot());
+        assert!(procs[2].is_ghost());
+        assert!(!procs[2].is_bot());
+        let text = render_ps(&procs);
+        assert!(text.contains("tracked"));
+        assert!(text.contains("BOT"));
+        assert!(text.contains("GHOST"));
+    }
+
+    #[test]
+    fn bot_commands_are_detected() {
+        assert!(command_launches_bot("mox bot --once"));
+        assert!(command_launches_bot("mox check daemon --interval 60"));
+        assert!(!command_launches_bot("opencode run --auto"));
+        assert!(!command_launches_bot("/home/u/mox-remote/x/.mox/run.sh"));
+    }
+
+    #[test]
+    fn detached_runner_marks_itself_as_remote() {
+        let script = detached_script(&cfg(), "demo", 60);
+        assert!(script.contains("MOX_REMOTE_RUN=1"));
+        assert!(!command_launches_bot(&script));
     }
 
     #[test]

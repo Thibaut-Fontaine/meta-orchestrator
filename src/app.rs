@@ -224,13 +224,31 @@ impl App {
             Command::Report { out: path } => self.cmd_report(path.as_deref(), out),
             Command::Project { action } => match action {
                 crate::cli::ProjectAction::List => self.cmd_status(false, false, out),
-                crate::cli::ProjectAction::Archive { slug } => self.cmd_project_archive(&slug, out),
+                crate::cli::ProjectAction::Archive { slug }
+                | crate::cli::ProjectAction::Remove { slug } => {
+                    self.cmd_project_archive(&slug, out)
+                }
             },
             Command::Logs { slug, lines } => self.cmd_logs(&slug, lines, out),
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
-            Command::Bot { once } => {
+            Command::Bot { once, allow_remote } => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                if crate::bot::remote_context(&cwd) && !allow_remote && !self.cfg.allow_remote_bots
+                {
+                    bail!(
+                        "refusing to run the Telegram bot on a remote/VPS host. \
+                         mox never launches bots remotely; if a human really wants this, \
+                         run `mox bot --allow-remote` (or set allow_remote_bots = true)."
+                    );
+                }
+                if allow_remote {
+                    writeln!(
+                        out,
+                        "warning: running the Telegram bot on a remote host because --allow-remote was passed"
+                    )?;
+                }
                 let mut bot = crate::bot::Bot::new(&self.cfg, self.runner.clone())?;
                 bot.run(once)
             }
@@ -266,6 +284,8 @@ impl App {
                 VpsCommand::Approvals => self.cmd_vps_approvals(out),
                 VpsCommand::Setup => self.cmd_vps_setup(out),
                 VpsCommand::Sync { slug } => self.cmd_vps_sync(slug.as_deref(), out),
+                VpsCommand::Ps => self.cmd_vps_ps(out),
+                VpsCommand::Cleanup { apply, yes } => self.cmd_vps_cleanup(apply, yes, out),
                 VpsCommand::Plan { compute } => self.cmd_vps_plan(&compute, out),
             },
             Command::Ideas { file } => self.cmd_ideas(&file, out),
@@ -785,6 +805,26 @@ impl App {
         }
         if specs.is_empty() {
             bail!("the plan has no projects");
+        }
+
+        if opts.retry_failed {
+            for spec in &specs {
+                if let Some(project) = state.project(&spec.slug) {
+                    if project.attempts > 0 {
+                        let factor = 1u64 << (project.attempts.saturating_sub(1).min(6));
+                        let delay = (self.cfg.retry_backoff_secs * factor).min(60);
+                        if delay > 0 {
+                            writeln!(
+                                out,
+                                "  retrying {} after {delay}s (attempt {})",
+                                spec.slug,
+                                project.attempts + 1
+                            )?;
+                            std::thread::sleep(std::time::Duration::from_secs(delay));
+                        }
+                    }
+                }
+            }
         }
 
         let cores = std::thread::available_parallelism()
@@ -2479,6 +2519,66 @@ impl App {
         Ok(())
     }
 
+    fn cmd_vps_ps(&mut self, out: &mut dyn Write) -> Result<()> {
+        let state = self.load_state()?;
+        let procs =
+            crate::remote::audit(self.runner.as_ref(), &self.cfg, &self.cfg.ssh_alias, &state)?;
+        writeln!(out, "{}", crate::remote::render_ps(&procs))?;
+        if procs.iter().any(|p| p.is_bot()) {
+            writeln!(
+                out,
+                "\nWARNING: a mox bot process is running on the VPS. mox never launches it; \
+                 inspect it and use `mox vps cleanup` if it is not wanted."
+            )?;
+        }
+        Ok(())
+    }
+
+    fn cmd_vps_cleanup(&mut self, apply: bool, yes: bool, out: &mut dyn Write) -> Result<()> {
+        let state = self.load_state()?;
+        let procs =
+            crate::remote::audit(self.runner.as_ref(), &self.cfg, &self.cfg.ssh_alias, &state)?;
+        let ghosts: Vec<&crate::remote::RemoteProcess> = procs
+            .iter()
+            .filter(|p| p.is_ghost() && (p.args.contains("mox-remote") || p.is_bot()))
+            .collect();
+        if ghosts.is_empty() {
+            writeln!(out, "no untracked mox ghost to clean")?;
+            return Ok(());
+        }
+        writeln!(out, "untracked mox processes:")?;
+        for p in &ghosts {
+            writeln!(
+                out,
+                "  pid {} · {} · {}",
+                p.pid,
+                crate::util::format_secs(p.etimes),
+                p.args
+            )?;
+        }
+        if !apply {
+            writeln!(
+                out,
+                "\ndry run: pass `--apply --yes` to kill ONLY these pids."
+            )?;
+            return Ok(());
+        }
+        if !yes {
+            bail!("refusing to kill remote processes without --yes");
+        }
+        let pids: Vec<u32> = ghosts.iter().map(|p| p.pid).collect();
+        let output = self.runner.run(&crate::remote::cleanup_spec(
+            &self.cfg,
+            &self.cfg.ssh_alias,
+            &pids,
+        ))?;
+        if !output.success() {
+            bail!("cleanup failed: {}", output.tail(4));
+        }
+        writeln!(out, "sent SIGTERM/SIGKILL to {} ghost pid(s)", pids.len())?;
+        Ok(())
+    }
+
     fn cmd_vps_setup(&mut self, out: &mut dyn Write) -> Result<()> {
         let check = crate::remote::check(self.runner.as_ref(), &self.cfg, &self.cfg.ssh_alias);
         writeln!(out, "remote prerequisites for `{}`:", self.cfg.ssh_alias)?;
@@ -2948,6 +3048,53 @@ mod tests {
         assert_eq!(project.remote_pid, None);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("completed and fetched back"), "{text}");
+    }
+
+    #[test]
+    fn vps_cleanup_only_kills_untracked_mox_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.runner = Arc::new(FakeRunner::new(|spec| {
+            if spec.program == "ssh" {
+                let command = spec.args.last().cloned().unwrap_or_default();
+                if command.contains("ps -eo") {
+                    return crate::exec::Output {
+                        code: Some(0),
+                        stdout: "100 1 50 /home/u/mox-remote/demo/.mox/run.sh\n\
+                                 200 1 7 /home/u/mox-remote/old/.mox/run.sh\n\
+                                 300 1 3 mox bot --once\n"
+                            .into(),
+                        ..crate::exec::Output::default()
+                    };
+                }
+            }
+            crate::exec::Output::ok()
+        }));
+        let mut state = State::default();
+        let mut tracked = ProjectState::new("demo", "Demo", "/tmp/demo");
+        tracked.target = "vps".into();
+        tracked.status = ProjectStatus::Running;
+        tracked.remote_pid = Some(100);
+        state.upsert(tracked);
+        app.save_state(&state).unwrap();
+
+        let mut out = Vec::new();
+        app.cmd_vps_cleanup(false, false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("200"), "{text}");
+        assert!(text.contains("300"), "{text}");
+        assert!(!text.contains("pid 100"), "{text}");
+        assert!(text.contains("dry run"), "{text}");
+
+        let mut out = Vec::new();
+        app.cmd_vps_cleanup(true, true, &mut out).unwrap();
+        let displays = app.runner_displays();
+        let cleanup = displays
+            .iter()
+            .find(|d| d.contains("kill -TERM"))
+            .expect("cleanup command");
+        assert!(cleanup.contains("200 300"), "{cleanup}");
+        assert!(!cleanup.contains("100"), "{cleanup}");
     }
 
     #[test]

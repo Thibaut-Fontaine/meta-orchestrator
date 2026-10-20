@@ -251,6 +251,11 @@ pub enum Command {
         /// Process one long-poll batch and exit (debug/cron).
         #[arg(long)]
         once: bool,
+
+        /// Explicitly allow the bot to run on a remote/VPS checkout.
+        /// mox never sets this automatically.
+        #[arg(long)]
+        allow_remote: bool,
     },
 
     /// Send or inspect notifications (Telegram, desktop, webhook).
@@ -339,6 +344,11 @@ pub enum ProjectAction {
     List,
     /// Move a finished workspace under .mox/archive (never deletes the repo).
     Archive {
+        /// Project slug.
+        slug: String,
+    },
+    /// Alias for archive: remove the workspace locally, keep the GitHub repo.
+    Remove {
         /// Project slug.
         slug: String,
     },
@@ -459,6 +469,17 @@ pub enum VpsCommand {
         /// Only this project slug.
         #[arg(long)]
         slug: Option<String>,
+    },
+    /// List mox/agent processes on the VPS and flag untracked ghosts.
+    Ps,
+    /// Kill untracked mox ghosts (requires --apply --yes; never tracked runs).
+    Cleanup {
+        /// Actually send signals.
+        #[arg(long)]
+        apply: bool,
+        /// Confirm the cleanup.
+        #[arg(long)]
+        yes: bool,
     },
     /// Print an OVHcloud provisioning checklist for a workload.
     Plan {
@@ -651,6 +672,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_project_remove() {
+        let cli = Cli::try_parse_from(["mox", "project", "remove", "demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Project {
+                action: ProjectAction::Remove { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn parses_status_verbose_and_report() {
         let cli = Cli::try_parse_from(["mox", "status", "--verbose"]).unwrap();
         assert!(matches!(cli.command, Command::Status { verbose: true, .. }));
@@ -697,6 +729,27 @@ mod tests {
                 owner: Some(ref o),
                 ..
             } if o == "my-org"
+        ));
+    }
+
+    #[test]
+    fn parses_vps_ps_and_cleanup() {
+        let cli = Cli::try_parse_from(["mox", "vps", "ps"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Ps
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "vps", "cleanup", "--apply", "--yes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Cleanup {
+                    apply: true,
+                    yes: true
+                }
+            }
         ));
     }
 
@@ -822,7 +875,13 @@ mod tests {
     #[test]
     fn parses_bot() {
         let cli = Cli::try_parse_from(["mox", "bot", "--once"]).unwrap();
-        assert!(matches!(cli.command, Command::Bot { once: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Bot {
+                once: true,
+                allow_remote: false
+            }
+        ));
     }
 
     #[test]

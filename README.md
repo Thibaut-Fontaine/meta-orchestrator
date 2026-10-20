@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 287 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 294 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -107,6 +107,8 @@ Useful flags:
 | `mox up --target vps --detach` | start a VPS run that survives shutting the workstation down |
 | `mox vps sync [--slug slug]` | poll detached runs, fetch finished work back, update status |
 | `mox bot` / `mox bot --once` | read-only Telegram bot (long-poll / one batch) |
+| `mox vps ps` | audit remote mox/agent processes, flag GHOST/BOT |
+| `mox vps cleanup --apply --yes` | kill only untracked mox-remote/bot pids |
 | `mox up --owner ORG` | create the private repo under an org |
 | `mox --run-timeout 1800 up` | wall-clock cap per agent run (seconds) |
 | `mox status` | table with milestone progress and ETA |
@@ -323,6 +325,18 @@ The VPS needs `opencode` and model auth configured **on the VPS**; mox never
 copies keys or tokens. `mox vps setup` reports exactly what is missing. The VPS
 is not cloned from GitHub, so no `gh` credentials are needed there.
 
+### No hidden remote ghosts
+
+- `mox` never launches `mox bot` on the VPS. The bot refuses to start in a
+  remote context (`MOX_REMOTE_RUN`, `.mox/remote.owner`, `mox-remote` path)
+  unless a human explicitly passes `--allow-remote` or sets
+  `allow_remote_bots = true` (default false).
+- Every detached run is recorded in local state with its remote pid.
+- `mox vps ps` lists mox/agent processes, marks tracked runs, and flags
+  untracked `GHOST` processes and any `BOT`.
+- `mox vps cleanup` is a dry run; `--apply --yes` kills only untracked
+  `mox-remote` or bot pids, never tracked runs or unrelated processes.
+
 ## Telegram bot
 
 `mox bot` is a read-only Telegram bot. It long-polls `getUpdates` (token from
@@ -466,6 +480,7 @@ reserve_cores = 1
 nice_level = 10
 min_free_disk_mb = 2048
 mem_per_agent_mb = 768
+retry_backoff_secs = 5
 project_disk_budget_mb = 4096
 brain_timeout_secs = 900
 run_timeout_secs = 7200   # wall-clock cap per agent run
@@ -477,6 +492,7 @@ extra_instructions = ""
 # Notifications (optional, off by default)
 notify_desktop = false
 notify_telegram = false
+allow_remote_bots = false   # hard wall: mox never runs its bot remotely by default
 telegram_chat_id = ""
 telegram_token_env = "MOX_TELEGRAM_TOKEN"
 notify_webhook = false
@@ -517,7 +533,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 287 unit + 8 end-to-end tests
+cargo test                 # 294 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```
