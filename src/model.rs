@@ -263,6 +263,9 @@ pub struct Plan {
     pub created_at: String,
     #[serde(default)]
     pub source: String,
+    /// Hardware profile used for the planning call (best effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<crate::host::HostProfile>,
     #[serde(default)]
     pub specs: Vec<ProjectSpec>,
 }

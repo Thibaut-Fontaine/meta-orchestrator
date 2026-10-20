@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 222 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 226 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -230,6 +230,17 @@ How the ETA is computed:
 4. a blocked milestone makes the ETA unavailable (`blocked`);
 5. a milestone without an estimate falls back to 30 minutes per weight unit.
 
+Planning is **machine-aware**: the planning prompt receives the CPU model, core
+count, RAM and architecture of this workstation, so the model sizes milestones
+for the hardware it will actually run on (`mox plan` prints `estimates for:
+<CPU> · N cores · …`). **Algorithmic complexity is a planning input, not a
+runtime formula**: the model is asked to state the expected input scale (for
+example `O(n log n), n≈10k rows`) and derive its minute estimate from it. The
+ETA itself uses that estimate plus the measured actual/planned calibration.
+There is no synthetic CPU benchmark: different workloads (compilation, network,
+data volume) do not correlate with one score, and real milestone timings are the
+better signal.
+
 The board is the contract: `mox status --watch` polls it (side-by-side with the
 checks sidebar), `mox up` prints it after each wave, `mox status --json` exposes
 `milestone_progress`, and milestone transitions can be pushed to Telegram if
@@ -389,7 +400,7 @@ needed.
 Testing:
 
 ```bash
-cargo test                 # 222 unit + 8 end-to-end tests
+cargo test                 # 226 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

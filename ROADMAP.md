@@ -1,6 +1,6 @@
 # ROADMAP — meta-orchestrator (`mox`)
 
-Status: **v0.3.0** · 222 unit tests + 8 end-to-end tests · private repo,
+Status: **v0.3.0** · 226 unit tests + 8 end-to-end tests · private repo,
 `main` pushed.
 
 ## Decisions locked in (2026-10-20)
@@ -16,6 +16,7 @@ Status: **v0.3.0** · 222 unit tests + 8 end-to-end tests · private repo,
 | Notifications | Telegram bot + optional desktop/webhook; token only via env + 0600 curl config | ✅ |
 | Reminder delivery | `mox check notify` one-shot digest, suitable for a systemd **user** timer | ✅ |
 | Project tracking | Ordered milestones with sub-todos, complexity weights, estimates, transition times and a calibrated live ETA | ✅ |
+| Machine-aware planning | CPU model, cores and RAM are passed to the planner; algorithmic complexity + input scale inform estimates | ✅ |
 
 This document is the honest gap analysis and the plan from v0.1 to v1.0. It is
 ordered by risk first, then by the original product vision.

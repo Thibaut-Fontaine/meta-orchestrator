@@ -240,7 +240,7 @@ pub fn local_capacity() -> HostCapacity {
     }
 }
 
-fn read_mem_mb() -> u64 {
+pub(crate) fn read_mem_mb() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|text| {

@@ -418,6 +418,7 @@ impl App {
         let _lock = self.up_lock()?;
         let cached = state::load_plan(&self.cfg.plan_file())?;
         let source_name;
+        let host_profile: Option<crate::host::HostProfile>;
 
         let mut specs: Vec<ProjectSpec> = if let Some(path) = &ideas_path {
             let ideas = ideas::load_ideas(path)?;
@@ -426,7 +427,9 @@ impl App {
                 "asking the planning model about {} project idea(s)...",
                 ideas.len()
             )?;
-            let prompt = prompts::questions_prompt(&self.cfg, &ideas);
+            let host = crate::host::HostProfile::detect();
+            host_profile = Some(host.clone());
+            let prompt = prompts::questions_prompt(&self.cfg, &ideas, &host);
             let reply = self
                 .brain
                 .think(&prompt, self.cfg.brain_timeout_secs)
@@ -438,6 +441,7 @@ impl App {
             match cached {
                 Some(plan) => {
                     source_name = plan.source;
+                    host_profile = plan.host.clone();
                     plan.specs
                 }
                 None => {
@@ -477,6 +481,7 @@ impl App {
         let plan = Plan {
             created_at: now_rfc3339(),
             source: source_name,
+            host: host_profile,
             specs,
         };
         state::save_plan(&self.cfg.plan_file(), &plan)?;
@@ -515,6 +520,9 @@ impl App {
         self.save_state(&state)?;
 
         writeln!(out)?;
+        if let Some(host) = &plan.host {
+            writeln!(out, "estimates for: {}", host.describe())?;
+        }
         writeln!(out, "plan for {} project(s):", plan.specs.len())?;
         writeln!(
             out,
@@ -1854,6 +1862,7 @@ mod tests {
         let plan = Plan {
             created_at: now_rfc3339(),
             source: "test".into(),
+            host: None,
             specs,
         };
         state::save_plan(&app.cfg.plan_file(), &plan).unwrap();
@@ -1906,9 +1915,13 @@ mod tests {
             .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("expense"));
+        assert!(text.contains("estimates for:"), "{text}");
         let saved = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
         assert_eq!(saved.specs.len(), 1);
         assert_eq!(saved.specs[0].compute, ComputeNeed::Medium);
+        let host = saved.host.as_ref().expect("host profile saved");
+        assert!(host.cores >= 1);
+        assert!(!host.cpu_model.is_empty());
         let state = state::load(&app.cfg.state_file()).unwrap();
         assert_eq!(state.projects.len(), 1);
         assert_eq!(state.projects["expense"].status, ProjectStatus::Planned);

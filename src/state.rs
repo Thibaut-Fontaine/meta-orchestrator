@@ -203,6 +203,7 @@ mod tests {
         let plan = Plan {
             created_at: "now".into(),
             source: "ideas.txt".into(),
+            host: None,
             specs: vec![],
         };
         save_plan(&path, &plan).unwrap();

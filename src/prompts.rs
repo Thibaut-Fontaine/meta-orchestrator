@@ -5,6 +5,7 @@
 //! safe defaults so one malformed field never blocks the whole plan.
 
 use crate::config::Config;
+use crate::host::HostProfile;
 use crate::model::{Complexity, ComputeNeed, Idea, MilestoneSpec, ProjectSpec, Question};
 use crate::util::{slug_from_idea, slugify, truncate_chars, unique_slug};
 use anyhow::{bail, Context, Result};
@@ -28,7 +29,7 @@ pub fn planning_context(cfg: &Config) -> String {
 
 /// Prompt asking for clarifying questions and a first technical read of each
 /// idea.
-pub fn questions_prompt(cfg: &Config, ideas: &[Idea]) -> String {
+pub fn questions_prompt(cfg: &Config, ideas: &[Idea], host: &HostProfile) -> String {
     let mut out = String::new();
     out.push_str(&planning_context(cfg));
     out.push_str(
@@ -82,7 +83,9 @@ pub fn questions_prompt(cfg: &Config, ideas: &[Idea]) -> String {
          empty string. Estimates drive the ETA shown by `mox status`, so be \
          honest about size.\n\n",
     );
-    out.push_str("## Ideas\n");
+    out.push_str("## Target machine\n");
+    out.push_str(&host.planning_guidance());
+    out.push_str("\n\n## Ideas\n");
     for (index, idea) in ideas.iter().enumerate() {
         out.push_str(&format!(
             "\n### Idea {} (slug hint: `{}`)\n{}\n",
@@ -591,9 +594,16 @@ mod tests {
     #[test]
     fn questions_prompt_lists_every_idea_and_schema() {
         let cfg = Config::default();
+        let host = HostProfile {
+            cpu_model: "Test CPU".into(),
+            cores: 8,
+            mem_mb: 16_000,
+            arch: "x86_64".into(),
+        };
         let prompt = questions_prompt(
             &cfg,
             &[idea("One", "first idea"), idea("Two", "second idea")],
+            &host,
         );
         assert!(prompt.contains("first idea"));
         assert!(prompt.contains("second idea"));
@@ -603,6 +613,8 @@ mod tests {
         assert!(prompt.contains("\"milestones\""));
         assert!(prompt.contains("\"estimate_minutes\""));
         assert!(prompt.contains("\"algorithmic_complexity\""));
+        assert!(prompt.contains("Test CPU"));
+        assert!(prompt.contains("input scale"));
     }
 
     #[test]

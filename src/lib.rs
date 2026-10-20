@@ -19,6 +19,7 @@ pub mod config;
 pub mod exec;
 pub mod github;
 pub mod guard;
+pub mod host;
 pub mod ideas;
 pub mod lock;
 pub mod milestones;
