@@ -321,6 +321,26 @@ impl CheckStore {
         check.updated_at = now;
         Ok(())
     }
+
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        let before = self.checks.len();
+        self.checks.retain(|c| c.id != id);
+        if self.checks.len() == before {
+            bail!("unknown check `{id}`");
+        }
+        Ok(())
+    }
+
+    pub fn reopen(&mut self, id: &str, now: DateTime<Utc>) -> Result<()> {
+        let Some(check) = self.checks.iter_mut().find(|c| c.id == id) else {
+            bail!("unknown check `{id}`");
+        };
+        check.status = CheckStatus::Open;
+        check.done_at = None;
+        check.done_note.clear();
+        check.updated_at = now;
+        Ok(())
+    }
 }
 
 /// Load the queue; a missing file is an empty queue.
@@ -520,7 +540,20 @@ pub fn oneline(store: &CheckStore, now: DateTime<Utc>) -> String {
 
 /// Render the dashboard/sidebar. Deterministic and terminal-width agnostic.
 pub fn render(store: &CheckStore, now: DateTime<Utc>, include_done: bool) -> String {
-    let items = ordered_open(store, now);
+    render_limited(store, now, include_done, None)
+}
+
+/// Same as [`render`] but only shows the first `limit` open checks.
+pub fn render_limited(
+    store: &CheckStore,
+    now: DateTime<Utc>,
+    include_done: bool,
+    limit: Option<usize>,
+) -> String {
+    let mut items = ordered_open(store, now);
+    if let Some(limit) = limit {
+        items.truncate(limit);
+    }
     let mut out = String::new();
     out.push_str(&format!("CHECKS — {} UTC\n", now.format("%Y-%m-%d %H:%M")));
     if items.is_empty() {
@@ -1056,6 +1089,24 @@ not a checklist line
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].bucket, "overdue");
         assert_eq!(views[0].due_in_seconds, Some(-120));
+    }
+
+    #[test]
+    fn remove_reopen_and_limit() {
+        let mut store = CheckStore::default();
+        let id = store.add(check("first", Some(now() - Duration::minutes(1))));
+        store.add(check("second", Some(now() + Duration::hours(1))));
+        store.add(check("third", Some(now() + Duration::hours(2))));
+        store.mark_done(&id, "ok", now()).unwrap();
+        store.reopen(&id, now()).unwrap();
+        assert_eq!(store.get(&id).unwrap().status, CheckStatus::Open);
+        assert!(store.get(&id).unwrap().done_note.is_empty());
+        let text = render_limited(&store, now(), false, Some(1));
+        assert!(text.contains("first"), "{text}");
+        assert!(!text.contains("second"), "{text}");
+        store.remove(&id).unwrap();
+        assert!(store.get(&id).is_none());
+        assert!(store.remove("nope").is_err());
     }
 
     #[test]

@@ -228,12 +228,17 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
     std::fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
 
     let mut created = Vec::new();
-    let files = [
+    let opencode_permissions = crate::guard::opencode_permissions(&path);
+    let files = vec![
         ("README.md", readme(spec)),
         ("AGENTS.md", AGENTS_MD.to_string()),
         (".gitignore", GITIGNORE.to_string()),
         ("TASK.md", task_markdown(cfg, spec)),
         ("CHECKS.md", CHECKS_MD.to_string()),
+        (
+            "opencode.json",
+            serde_json::to_string_pretty(&opencode_permissions).unwrap() + "\n",
+        ),
     ];
     for (name, content) in files {
         let file = path.join(name);
@@ -423,7 +428,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scaffolding = scaffold_project(&cfg(dir.path()), &spec()).unwrap();
         assert!(!scaffolding.existed);
-        assert_eq!(scaffolding.created.len(), 6);
+        assert_eq!(scaffolding.created.len(), 7);
         let project = dir.path().join("demo");
         assert!(project.join("README.md").exists());
         assert!(project.join("AGENTS.md").exists());
@@ -431,6 +436,9 @@ mod tests {
         assert!(project.join("TASK.md").exists());
         assert!(project.join("CHECKS.md").exists());
         assert!(project.join("MILESTONES.json").exists());
+        assert!(project.join("opencode.json").exists());
+        let perms = crate::guard::opencode_permissions(&project);
+        assert_eq!(perms["permission"]["bash"]["ssh *"], "deny");
         let board = crate::milestones::load(&project.join("MILESTONES.json")).unwrap();
         assert_eq!(board.slug, "demo");
         assert_eq!(board.milestones.len(), 3);

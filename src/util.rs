@@ -138,6 +138,16 @@ pub fn human_mb(mb: u64) -> String {
     human_bytes(mb.saturating_mul(1024 * 1024))
 }
 
+/// Stable short hash (FNV-1a, 12 hex chars) for content change detection.
+pub fn short_hash(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")[..12].to_string()
+}
+
 /// Compact human duration: `45s`, `12m`, `2h05m`, `3d4h`.
 pub fn format_secs(seconds: u64) -> String {
     if seconds < 60 {
@@ -163,6 +173,34 @@ pub fn format_secs(seconds: u64) -> String {
     } else {
         format!("{days}d{rem_hours}h")
     }
+}
+
+/// Standard base64 (with padding). Used to pass long prompts through `ssh`
+/// without shell-quoting hazards.
+pub fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Extract the first balanced JSON object from arbitrary text.
@@ -405,6 +443,22 @@ Thanks."#;
     fn extract_json_returns_none_without_object() {
         assert!(extract_json_object("no json here").is_none());
         assert!(extract_json_object("{unbalanced").is_none());
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn short_hash_is_stable() {
+        assert_eq!(short_hash("abc"), short_hash("abc"));
+        assert_ne!(short_hash("abc"), short_hash("abd"));
+        assert_eq!(short_hash("abc").len(), 12);
     }
 
     #[test]

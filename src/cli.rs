@@ -93,6 +93,22 @@ pub enum Command {
         /// Ignore the free-disk floor.
         #[arg(long)]
         force: bool,
+
+        /// Resume unfinished projects (skip completed ones).
+        #[arg(long)]
+        resume: bool,
+
+        /// Retry only projects that failed or were stopped.
+        #[arg(long)]
+        retry_failed: bool,
+
+        /// Where to run: local, vps (needs approval) or auto.
+        #[arg(long, default_value = "local", value_parser = ["local", "vps", "auto"])]
+        target: String,
+
+        /// GitHub owner/org for new repositories (default: authenticated user).
+        #[arg(long, value_name = "OWNER")]
+        owner: Option<String>,
     },
 
     /// Show the state of every project, with milestone progress and ETA.
@@ -108,6 +124,10 @@ pub enum Command {
         /// Refresh interval in seconds.
         #[arg(long, default_value_t = 10)]
         interval: u64,
+
+        /// Include the first lines of each project's STATUS.md.
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Print the tail of a project's agent log.
@@ -180,6 +200,10 @@ pub enum Command {
         /// Do not import CHECKS.md files from projects.
         #[arg(long)]
         no_sync: bool,
+
+        /// Show only the first N open checks.
+        #[arg(long, value_name = "N")]
+        top: Option<usize>,
     },
 
     /// Track milestones, progress and ETA for the project in the current dir.
@@ -192,11 +216,30 @@ pub enum Command {
         action: Option<MilestoneAction>,
     },
 
+    /// Project lifecycle: list or archive workspaces.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
+    /// Write a Markdown report across all projects.
+    Report {
+        /// Write to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+
     /// Cross-project milestone timing statistics (used to improve new ETAs).
     Stats {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+        /// Delete the learned cross-project statistics.
+        #[arg(long)]
+        reset: bool,
+        /// Confirm the reset.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Send or inspect notifications (Telegram, desktop, webhook).
@@ -280,6 +323,17 @@ pub enum MilestoneAction {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ProjectAction {
+    /// List projects (same table as `mox status`).
+    List,
+    /// Move a finished workspace under .mox/archive (never deletes the repo).
+    Archive {
+        /// Project slug.
+        slug: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum NotifyAction {
     /// Send a test message through every configured channel.
     Test,
@@ -338,6 +392,28 @@ pub enum CheckAction {
 
     /// Send a reminder digest of due checks through the configured channels.
     Notify,
+    /// Remove a check permanently.
+    Remove {
+        /// Check id.
+        id: String,
+    },
+    /// Reopen a completed check.
+    Reopen {
+        /// Check id.
+        id: String,
+    },
+    /// Export the queue as markdown or json.
+    Export {
+        /// md or json.
+        #[arg(long, default_value = "md", value_parser = ["md", "json"])]
+        format: String,
+    },
+    /// Send due-check reminders periodically (Ctrl-C to quit).
+    Daemon {
+        /// Seconds between checks.
+        #[arg(long, default_value_t = 300)]
+        interval: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -365,6 +441,14 @@ pub enum VpsCommand {
     },
     /// List projects with a VPS approval.
     Approvals,
+    /// Check the remote prerequisites for VPS execution.
+    Setup,
+    /// Print an OVHcloud provisioning checklist for a workload.
+    Plan {
+        /// light, medium, heavy or gpu.
+        #[arg(long, default_value = "heavy")]
+        compute: String,
+    },
 }
 
 #[cfg(test)]
@@ -421,11 +505,18 @@ mod tests {
                 only,
                 max_parallel,
                 no_run,
+                resume,
+                retry_failed,
+                target,
+                owner,
                 ..
             } => {
                 assert_eq!(only, vec!["alpha", "beta"]);
                 assert_eq!(max_parallel, Some(2));
                 assert!(no_run);
+                assert!(!resume && !retry_failed);
+                assert_eq!(target, "local");
+                assert!(owner.is_none());
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -530,9 +621,87 @@ mod tests {
     }
 
     #[test]
+    fn parses_project_commands() {
+        let cli = Cli::try_parse_from(["mox", "project", "archive", "demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Project {
+                action: ProjectAction::Archive { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_status_verbose_and_report() {
+        let cli = Cli::try_parse_from(["mox", "status", "--verbose"]).unwrap();
+        assert!(matches!(cli.command, Command::Status { verbose: true, .. }));
+        let cli = Cli::try_parse_from(["mox", "report", "--out", "/tmp/r.md"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Report { out: Some(ref p) } if p == std::path::Path::new("/tmp/r.md")
+        ));
+    }
+
+    #[test]
     fn parses_stats() {
         let cli = Cli::try_parse_from(["mox", "stats", "--json"]).unwrap();
-        assert!(matches!(cli.command, Command::Stats { json: true }));
+        assert!(matches!(cli.command, Command::Stats { json: true, .. }));
+    }
+
+    #[test]
+    fn parses_up_resume_and_retry() {
+        let cli = Cli::try_parse_from(["mox", "up", "--resume"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                resume: true,
+                retry_failed: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "up", "--retry-failed"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                retry_failed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_up_owner() {
+        let cli = Cli::try_parse_from(["mox", "up", "--owner", "my-org"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                owner: Some(ref o),
+                ..
+            } if o == "my-org"
+        ));
+    }
+
+    #[test]
+    fn parses_up_target_and_vps_setup() {
+        let cli = Cli::try_parse_from(["mox", "up", "--target", "vps"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up { target, .. } if target == "vps"
+        ));
+        let cli = Cli::try_parse_from(["mox", "vps", "setup"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Setup
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "vps", "plan", "--compute", "heavy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Vps {
+                action: VpsCommand::Plan { .. }
+            }
+        ));
     }
 
     #[test]
@@ -601,6 +770,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_check_extra_actions() {
+        for (argv, ok) in [
+            (vec!["mox", "check", "remove", "abc"], true),
+            (vec!["mox", "check", "reopen", "abc"], true),
+            (vec!["mox", "check", "export", "--format", "json"], true),
+            (vec!["mox", "check", "daemon"], true),
+        ] {
+            assert!(Cli::try_parse_from(argv.clone()).is_ok(), "{argv:?}");
+            assert!(ok);
+        }
+        let cli = Cli::try_parse_from(["mox", "check", "--top", "3"]).unwrap();
+        assert!(matches!(cli.command, Command::Check { top: Some(3), .. }));
     }
 
     #[test]

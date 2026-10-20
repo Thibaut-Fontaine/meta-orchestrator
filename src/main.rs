@@ -8,6 +8,7 @@ use meta_orchestrator::exec::RealRunner;
 use meta_orchestrator::guard;
 use meta_orchestrator::milestones;
 use meta_orchestrator::notify;
+use meta_orchestrator::shutdown;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    shutdown::install();
     let cli = Cli::parse();
     if let meta_orchestrator::cli::Command::Guard { program, args } = &cli.command {
         guard::dispatch(program, args);

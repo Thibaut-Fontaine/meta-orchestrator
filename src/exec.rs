@@ -89,12 +89,13 @@ pub struct Output {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    pub cancelled: bool,
     pub pid: Option<u32>,
 }
 
 impl Output {
     pub fn success(&self) -> bool {
-        !self.timed_out && self.code == Some(0)
+        !self.timed_out && !self.cancelled && self.code == Some(0)
     }
 
     pub fn ok() -> Self {
@@ -127,7 +128,9 @@ impl Output {
     }
 
     pub fn summary(&self) -> String {
-        if self.timed_out {
+        if self.cancelled {
+            "cancelled".to_string()
+        } else if self.timed_out {
             "timed out".to_string()
         } else {
             match self.code {
@@ -216,6 +219,11 @@ fn spawn_and_wait(
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     for (key, value) in &spec.env {
         command.env(key, value);
     }
@@ -237,16 +245,18 @@ fn spawn_and_wait(
     };
 
     let mut timed_out = false;
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
             None => {
-                if let Some(deadline) = deadline {
-                    if Instant::now() >= deadline {
-                        timed_out = true;
-                        let _ = child.kill();
-                        break child.wait()?;
-                    }
+                let shutdown = crate::shutdown::requested();
+                let deadline_hit = deadline.map(|d| Instant::now() >= d).unwrap_or(false);
+                if shutdown || deadline_hit {
+                    cancelled = shutdown;
+                    timed_out = !shutdown;
+                    terminate_group(&mut child, pid);
+                    break child.wait()?;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -262,8 +272,35 @@ fn spawn_and_wait(
         stdout: String::new(),
         stderr: String::new(),
         timed_out,
+        cancelled,
         pid: Some(pid),
     })
+}
+
+/// Ask the whole process group to stop, then force it after a short grace.
+fn terminate_group(child: &mut std::process::Child, pid: u32) {
+    #[cfg(unix)]
+    {
+        let pgid = -(pid as i32);
+        unsafe {
+            libc::kill(pgid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => return,
+            }
+        }
+        unsafe {
+            libc::kill(pgid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (child, pid);
+    }
 }
 
 impl CommandRunner for RealRunner {
@@ -430,6 +467,13 @@ mod tests {
         };
         assert!(!timed.success());
         assert_eq!(timed.summary(), "timed out");
+        let cancelled = Output {
+            cancelled: true,
+            code: None,
+            ..Output::default()
+        };
+        assert!(!cancelled.success());
+        assert_eq!(cancelled.summary(), "cancelled");
     }
 
     #[test]

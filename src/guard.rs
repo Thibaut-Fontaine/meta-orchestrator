@@ -314,6 +314,106 @@ pub fn dispatch(program: &str, args: &[String]) -> ! {
     }
 }
 
+/// A per-project `opencode.json` that enforces what the PATH wrappers also
+/// block. It is loaded by OpenCode from the project working directory.
+///
+/// Rules are ordered (last match wins): the catch-all allow comes first, then
+/// specific denies. `external_directory` is denied so `--auto` cannot silently
+/// approve edits/reads outside the project.
+pub fn opencode_permissions(project_dir: &Path) -> serde_json::Value {
+    let dir = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let root = dir.display().to_string();
+    let project_glob = format!("{root}/**");
+    let deny_bash = [
+        "gh repo create*",
+        "gh repo delete*",
+        "gh repo edit*",
+        "gh repo transfer*",
+        "gh repo archive*",
+        "gh repo rename*",
+        "gh repo list*",
+        "gh api*",
+        "gh auth*",
+        "gh secret*",
+        "gh variable*",
+        "gh workflow*",
+        "gh search*",
+        "git push --force*",
+        "git push -f*",
+        "git push --mirror*",
+        "git remote add*",
+        "git remote remove*",
+        "git remote set-url*",
+        "git clone*",
+        "git config --global*",
+        "git config --system*",
+        "git filter-branch*",
+        "git filter-repo*",
+        "ssh *",
+        "scp *",
+        "sftp *",
+        "rsync *",
+        "sudo *",
+        "systemctl *",
+        "service *",
+        "crontab *",
+        "kill *",
+        "pkill *",
+        "killall *",
+        "rm -rf /*",
+        "rm -rf ~*",
+        "rm -rf $HOME*",
+        "rm -rf ..*",
+    ];
+    let mut bash = serde_json::Map::new();
+    bash.insert("*".to_string(), serde_json::json!("allow"));
+    for pattern in deny_bash {
+        bash.insert(pattern.to_string(), serde_json::json!("deny"));
+    }
+
+    let mut read = serde_json::Map::new();
+    read.insert("*".to_string(), serde_json::json!("allow"));
+    for pattern in [
+        "*.env",
+        "*.env.*",
+        "*.env.example",
+        "*.pem",
+        "*.key",
+        "*id_rsa*",
+        "*id_ed25519*",
+        "~/.ssh/**",
+        "~/.aws/**",
+        "~/.config/gh/**",
+        "~/.config/opencode/**",
+    ] {
+        let effect = if pattern.ends_with(".env.example") {
+            "allow"
+        } else {
+            "deny"
+        };
+        read.insert(pattern.to_string(), serde_json::json!(effect));
+    }
+
+    let mut external = serde_json::Map::new();
+    external.insert("*".to_string(), serde_json::json!("deny"));
+    external.insert(project_glob.clone(), serde_json::json!("allow"));
+
+    serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "read": read,
+            "edit": { "*": "allow" },
+            "external_directory": external,
+            "bash": bash,
+            "question": "deny",
+            "task": "allow",
+            "webfetch": "allow",
+            "websearch": "allow",
+            "todowrite": "allow"
+        }
+    })
+}
+
 /// True when `dir` is the guard directory of a project.
 pub fn is_guard_dir(dir: &Path) -> bool {
     dir.components().any(|c| c.as_os_str() == "guard")
@@ -477,6 +577,24 @@ mod tests {
     fn quotes_paths_with_spaces() {
         assert_eq!(shell_single_quote("/tmp/a b"), "'/tmp/a b'");
         assert_eq!(shell_single_quote("/tmp/a'b"), "'/tmp/a'\\''b'");
+    }
+
+    #[test]
+    fn opencode_permissions_deny_dangerous_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = opencode_permissions(dir.path());
+        let permission = &value["permission"];
+        assert_eq!(permission["bash"]["gh repo create*"], "deny");
+        assert_eq!(permission["bash"]["git push --force*"], "deny");
+        assert_eq!(permission["bash"]["ssh *"], "deny");
+        assert_eq!(permission["bash"]["*"], "allow");
+        assert_eq!(permission["external_directory"]["*"], "deny");
+        assert_eq!(permission["question"], "deny");
+        assert_eq!(permission["task"], "allow");
+        assert_eq!(permission["read"]["*.env"], "deny");
+        assert_eq!(permission["read"]["*.env.example"], "allow");
+        let compiled = serde_json::to_string(&value).unwrap();
+        assert!(compiled.contains("opencode.ai/config.json"));
     }
 
     #[test]

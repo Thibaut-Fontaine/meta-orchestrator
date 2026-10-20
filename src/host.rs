@@ -87,6 +87,20 @@ impl HostProfile {
     }
 }
 
+/// Available memory in MiB from `/proc/meminfo` (`MemAvailable`), 0 if unknown.
+pub fn mem_available_mb() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let rest = line.strip_prefix("MemAvailable:")?;
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                Some(kb / 1024)
+            })
+        })
+        .unwrap_or(0)
+}
+
 /// Parse the maximum `cpu MHz` value from `/proc/cpuinfo`.
 pub fn parse_cpu_mhz(cpuinfo: &str) -> Option<f64> {
     cpuinfo

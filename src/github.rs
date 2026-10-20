@@ -29,12 +29,17 @@ pub fn publish_private_repo(
     cfg: &crate::config::Config,
     dir: &Path,
     slug: &str,
+    owner: Option<&str>,
     dry_run: bool,
 ) -> Result<PublishResult> {
     if !dry_run && !dir.is_dir() {
         bail!("project directory does not exist: {}", dir.display());
     }
     let commit_message = "chore: scaffold project from meta-orchestrator";
+    let repo_name = match owner.map(str::trim).filter(|o| !o.is_empty()) {
+        Some(owner) => format!("{owner}/{slug}"),
+        None => slug.to_string(),
+    };
 
     let git = |args: Vec<&str>| {
         CommandSpec::new(&cfg.git_bin)
@@ -49,7 +54,7 @@ pub fn publish_private_repo(
         .args([
             "repo",
             "create",
-            slug,
+            &repo_name,
             "--private",
             "--source",
             ".",
@@ -60,7 +65,7 @@ pub fn publish_private_repo(
         .cwd(dir)
         .timeout(300);
     let verify = CommandSpec::new(&cfg.gh_bin)
-        .args(["repo", "view", slug, "--json", "visibility,url"])
+        .args(["repo", "view", &repo_name, "--json", "visibility,url"])
         .cwd(dir)
         .timeout(60);
     let remote = git(vec!["remote", "get-url", "origin"]);
@@ -84,6 +89,8 @@ pub fn publish_private_repo(
     if !dir.join(".git").exists() {
         run_checked(runner, &init, "git init")?;
     }
+    // Last line of defence against heavy files and secrets.
+    crate::hooks::install(dir)?;
     run_checked(runner, &add, "git add")?;
     let commit_output = runner.run(&commit)?;
     if !commit_output.success() && !is_nothing_to_commit(&commit_output) {
@@ -124,7 +131,7 @@ pub fn publish_private_repo(
         .unwrap_or_default();
     if !visibility.eq_ignore_ascii_case("private") {
         bail!(
-            "refusing to continue: repository `{slug}` is not private (visibility: `{visibility}`). \
+            "refusing to continue: repository `{repo_name}` is not private (visibility: `{visibility}`). \
              Make it private manually before running agents."
         );
     }
@@ -242,7 +249,8 @@ mod tests {
     fn creates_private_repo_and_verifies() {
         let runner = runner_with_visibility("PRIVATE");
         let dir = project_dir();
-        let result = publish_private_repo(&runner, &cfg(), dir.path(), "demo", false).unwrap();
+        let result =
+            publish_private_repo(&runner, &cfg(), dir.path(), "demo", None, false).unwrap();
         assert_eq!(result.repo_url, "https://github.com/me/demo");
         let calls = runner.displays();
         assert!(calls
@@ -263,15 +271,33 @@ mod tests {
     fn refuses_public_repo() {
         let runner = runner_with_visibility("PUBLIC");
         let dir = project_dir();
-        let err = publish_private_repo(&runner, &cfg(), dir.path(), "demo", false).unwrap_err();
+        let err =
+            publish_private_repo(&runner, &cfg(), dir.path(), "demo", None, false).unwrap_err();
         assert!(err.to_string().contains("not private"));
+    }
+
+    #[test]
+    fn owner_prefixes_the_repository_name() {
+        let runner = runner_with_visibility("PRIVATE");
+        let dir = project_dir();
+        let result =
+            publish_private_repo(&runner, &cfg(), dir.path(), "demo", Some("my-org"), false)
+                .unwrap();
+        assert!(result
+            .commands
+            .iter()
+            .any(|c| c.contains("repo create my-org/demo --private")));
+        assert!(result
+            .commands
+            .iter()
+            .any(|c| c.contains("repo view my-org/demo")));
     }
 
     #[test]
     fn never_runs_in_dry_run() {
         let runner = FakeRunner::ok();
         let dir = project_dir();
-        let result = publish_private_repo(&runner, &cfg(), dir.path(), "demo", true).unwrap();
+        let result = publish_private_repo(&runner, &cfg(), dir.path(), "demo", None, true).unwrap();
         assert!(result.dry_run);
         assert_eq!(runner.call_count(), 0);
         assert!(result.commands.iter().any(|c| c.contains("--private")));
@@ -301,7 +327,7 @@ mod tests {
             Output::ok()
         });
         let dir = project_dir();
-        publish_private_repo(&runner, &cfg(), dir.path(), "demo", false).unwrap();
+        publish_private_repo(&runner, &cfg(), dir.path(), "demo", None, false).unwrap();
     }
 
     #[test]
@@ -320,7 +346,8 @@ mod tests {
             Output::ok()
         });
         let dir = project_dir();
-        let err = publish_private_repo(&runner, &cfg(), dir.path(), "demo", false).unwrap_err();
+        let err =
+            publish_private_repo(&runner, &cfg(), dir.path(), "demo", None, false).unwrap_err();
         assert!(err.to_string().contains("may already exist"));
     }
 

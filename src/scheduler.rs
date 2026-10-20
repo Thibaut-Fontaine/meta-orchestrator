@@ -63,6 +63,31 @@ impl Scheduler {
         slots[slot % slots.len()].clone()
     }
 
+    /// Concurrency that respects the heaviest expected workload and RAM.
+    ///
+    /// Each agent is assumed to need at least its `preferred_cores` share; a
+    /// heavy project therefore reduces the number of concurrent agents instead
+    /// of starving everyone. Memory is a second, independent cap.
+    pub fn effective_parallel(
+        &self,
+        needs: &[crate::model::ComputeNeed],
+        mem_available_mb: u64,
+        mem_per_agent_mb: u64,
+    ) -> usize {
+        let heaviest = needs
+            .iter()
+            .map(|n| n.preferred_cores())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let by_cores = self.usable_cores() / heaviest;
+        let by_mem = match mem_available_mb.checked_div(mem_per_agent_mb) {
+            Some(n) => n.max(1) as usize,
+            None => self.max_parallel(),
+        };
+        self.max_parallel().min(by_cores.max(1)).min(by_mem).max(1)
+    }
+
     /// Indices of projects grouped into sequential waves of `max_parallel`.
     pub fn batches(&self, project_count: usize) -> Vec<Vec<usize>> {
         (0..project_count)
@@ -109,6 +134,27 @@ mod tests {
         assert_eq!(s.max_parallel(), 1);
         assert_eq!(s.slots(), vec![vec![0]]);
         assert_eq!(s.usable_cores(), 1);
+    }
+
+    #[test]
+    fn effective_parallel_accounts_for_heavy_and_ram() {
+        let s = Scheduler::new(8, 1, 4);
+        assert_eq!(s.effective_parallel(&[], 16_000, 768), 4);
+        // One heavy agent needs 4 usable cores; 7/4 = 1.
+        assert_eq!(
+            s.effective_parallel(&[crate::model::ComputeNeed::Heavy], 16_000, 768),
+            1
+        );
+        // Memory cap: 2 GiB available / 1 GiB per agent = 2.
+        assert_eq!(
+            s.effective_parallel(&[crate::model::ComputeNeed::Light], 2048, 1024),
+            2
+        );
+        // Always at least one agent.
+        assert_eq!(
+            s.effective_parallel(&[crate::model::ComputeNeed::Gpu], 100, 1024),
+            1
+        );
     }
 
     #[test]

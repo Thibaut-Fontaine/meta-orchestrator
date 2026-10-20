@@ -44,6 +44,10 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
 12. `mox` must stay an orchestrator: never run project builds, tests, code or
     CPU benchmarks inside mox. Agents compute; mox schedules, tracks and
     reports. Host probing only reads `/proc`.
+13. Remote execution must never copy SSH keys, tokens or model credentials to
+    the VPS. The VPS needs its own `opencode` and model auth. The workstation is
+    the source of truth; remote work is fetched as a bundle and only
+    fast-forward merged (a diverged remote branch is reported, never forced).
 
 ## Engineering rules
 

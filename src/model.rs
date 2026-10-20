@@ -263,6 +263,9 @@ pub struct Plan {
     pub created_at: String,
     #[serde(default)]
     pub source: String,
+    /// Stable hash of the ideas file used to build this plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
     /// Hardware profile used for the planning call (best effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<crate::host::HostProfile>,
@@ -291,6 +294,7 @@ pub enum ProjectStatus {
     Completed,
     Failed,
     Stopped,
+    Archived,
 }
 
 impl ProjectStatus {
@@ -302,6 +306,7 @@ impl ProjectStatus {
             ProjectStatus::Completed => "completed",
             ProjectStatus::Failed => "failed",
             ProjectStatus::Stopped => "stopped",
+            ProjectStatus::Archived => "archived",
         }
     }
 }
@@ -345,6 +350,16 @@ pub struct ProjectState {
     /// Duration of the last agent run, in seconds.
     #[serde(default)]
     pub duration_secs: u64,
+    /// How many times an agent has been launched for this project.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Last execution target: local, vps or a remote alias.
+    #[serde(default = "default_target")]
+    pub target: String,
+}
+
+fn default_target() -> String {
+    "local".to_string()
 }
 
 impl ProjectState {
@@ -368,6 +383,8 @@ impl ProjectState {
             vps_approved_at: None,
             vps_approved_note: String::new(),
             duration_secs: 0,
+            attempts: 0,
+            target: "local".to_string(),
         }
     }
 }

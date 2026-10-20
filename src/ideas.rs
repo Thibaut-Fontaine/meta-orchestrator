@@ -118,6 +118,21 @@ fn split_title(text: &str) -> (Option<String>, String) {
     (None, text.trim().to_string())
 }
 
+/// Stable content hash used to detect changes to an ideas file.
+pub fn content_hash(content: &str) -> String {
+    crate::util::short_hash(content)
+}
+
+/// Hash an ideas file; `None` for stdin or unreadable files.
+pub fn file_hash(path: &Path) -> Option<String> {
+    if path == Path::new("-") {
+        return None;
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| content_hash(&text))
+}
+
 /// Read and parse an ideas file. `-` means standard input.
 pub fn load_ideas(path: &Path) -> Result<Vec<Idea>> {
     let content = if path == Path::new("-") {
@@ -184,6 +199,13 @@ mod tests {
     fn empty_input_is_an_error() {
         let err = parse_ideas("\n# only comments\n").unwrap_err();
         assert!(err.to_string().contains("no project ideas"));
+    }
+
+    #[test]
+    fn content_hash_detects_changes() {
+        assert_eq!(content_hash("abc"), content_hash("abc"));
+        assert_ne!(content_hash("abc"), content_hash("abd"));
+        assert!(content_hash("").len() >= 8);
     }
 
     #[test]

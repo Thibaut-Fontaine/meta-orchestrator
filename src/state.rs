@@ -203,6 +203,7 @@ mod tests {
         let plan = Plan {
             created_at: "now".into(),
             source: "ideas.txt".into(),
+            source_hash: None,
             host: None,
             specs: vec![],
         };

@@ -36,6 +36,7 @@ pub struct RunOutcome {
     pub output: Output,
     pub log_path: PathBuf,
     pub duration_secs: u64,
+    pub cores: Vec<usize>,
 }
 
 impl RunOutcome {
@@ -158,6 +159,7 @@ pub fn execute_run(
         output,
         log_path: log,
         duration_secs: started.elapsed().as_secs(),
+        cores: run.cores.clone(),
     })
 }
 
@@ -180,6 +182,7 @@ pub fn execute_batch(
                         output: Output::failure(-1, format!("failed to launch: {err:#}")),
                         log_path: PathBuf::new(),
                         duration_secs: 0,
+                        cores: Vec::new(),
                     },
                 });
                 (run.slug.clone(), handle)
@@ -194,11 +197,74 @@ pub fn execute_batch(
                     output: Output::failure(-1, "agent thread panicked"),
                     log_path: PathBuf::new(),
                     duration_secs: 0,
+                    cores: Vec::new(),
                 })
             })
             .collect()
     });
     outcomes
+}
+
+/// Execute a rolling pool: `max_parallel` workers pull projects from a shared
+/// queue, so a finishing agent immediately frees a slot for the next project
+/// (no wave barrier). Each worker keeps its own core set.
+pub fn execute_pool(
+    runner: &dyn CommandRunner,
+    cfg: &Config,
+    runs: Vec<ProjectRun>,
+    max_parallel: usize,
+    slots: &[Vec<usize>],
+) -> Vec<RunOutcome> {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    let workers = max_parallel.max(1).min(runs.len());
+    let queue: Mutex<VecDeque<(usize, ProjectRun)>> =
+        Mutex::new(runs.into_iter().enumerate().collect());
+    let results: Mutex<Vec<(usize, RunOutcome)>> = Mutex::new(Vec::new());
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..workers {
+            let cores = slots
+                .get(worker % slots.len().max(1))
+                .cloned()
+                .unwrap_or_default();
+            let queue = &queue;
+            let results = &results;
+            handles.push(scope.spawn(move || loop {
+                if crate::shutdown::requested() {
+                    break;
+                }
+                let job = queue.lock().unwrap().pop_front();
+                let Some((index, mut run)) = job else {
+                    break;
+                };
+                run.cores = cores.clone();
+                let outcome = match execute_run(runner, cfg, &run) {
+                    Ok(outcome) => outcome,
+                    Err(err) => RunOutcome {
+                        slug: run.slug.clone(),
+                        output: Output::failure(-1, format!("failed to launch: {err:#}")),
+                        log_path: PathBuf::new(),
+                        duration_secs: 0,
+                        cores: run.cores.clone(),
+                    },
+                };
+                results.lock().unwrap().push((index, outcome));
+            }));
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
+
+    let mut collected = results.into_inner().unwrap_or_default();
+    collected.sort_by_key(|(index, _)| *index);
+    collected.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
 /// Remove a stale pid file (used after a completed/stopped run).
@@ -359,6 +425,44 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(280),
             "batch took {elapsed:?}, expected parallel execution"
+        );
+    }
+
+    #[test]
+    fn pool_starts_next_project_without_a_wave_barrier() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg(dir.path());
+        let runner = FakeRunner::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Output::ok()
+        });
+        let runs: Vec<ProjectRun> = ["a", "b", "c"]
+            .iter()
+            .map(|slug| {
+                ProjectRun::new(
+                    &spec(slug),
+                    dir.path().to_path_buf(),
+                    slug.to_string(),
+                    vec![0],
+                )
+            })
+            .collect();
+        let started = Instant::now();
+        let outcomes = execute_pool(&runner, &cfg, runs, 2, &[vec![0, 1], vec![2, 3]]);
+        let elapsed = started.elapsed();
+        assert_eq!(outcomes.len(), 3);
+        // 3 jobs x 100ms over 2 workers: ~200ms, not 300ms (two waves).
+        assert!(
+            elapsed < std::time::Duration::from_millis(280),
+            "pool took {elapsed:?}"
+        );
+        let slugs: Vec<&str> = outcomes.iter().map(|o| o.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["a", "b", "c"]);
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.cores == vec![0, 1] || o.cores == vec![2, 3]),
+            "{outcomes:?}"
         );
     }
 

@@ -28,6 +28,14 @@ pub struct Config {
     pub nice_bin: String,
     /// Optional `ionice` wrapper (idle IO class).
     pub ionice_bin: String,
+    /// SSH executable for remote execution.
+    pub ssh_bin: String,
+    /// rsync executable for mirroring projects to the VPS.
+    pub rsync_bin: String,
+    /// Remote root on the VPS (tilde allowed).
+    pub remote_root: String,
+    /// OpenCode executable on the VPS.
+    pub remote_opencode_bin: String,
     /// SSH alias of the VPS (from ~/.ssh/config).
     pub ssh_alias: String,
     /// Global agent rules the agents are told to read.
@@ -40,6 +48,8 @@ pub struct Config {
     pub nice_level: i32,
     /// Refuse to start work below this much free disk.
     pub min_free_disk_mb: u64,
+    /// Assumed RAM per running agent (admission control).
+    pub mem_per_agent_mb: u64,
     /// Soft budget per project, used by `status` and `clean`.
     pub project_disk_budget_mb: u64,
     /// Timeout for one brainstorming call.
@@ -78,12 +88,17 @@ impl Default for Config {
             taskset_bin: "taskset".to_string(),
             nice_bin: "nice".to_string(),
             ionice_bin: "ionice".to_string(),
+            ssh_bin: "ssh".to_string(),
+            rsync_bin: "rsync".to_string(),
+            remote_root: "~/mox-remote".to_string(),
+            remote_opencode_bin: "opencode".to_string(),
             ssh_alias: "vps-ovh".to_string(),
             agents_global: "~/AGENTS-GLOBAL.md".to_string(),
             max_parallel: default_max_parallel(),
             reserve_cores: 1,
             nice_level: 10,
             min_free_disk_mb: 2048,
+            mem_per_agent_mb: 768,
             project_disk_budget_mb: 4096,
             brain_timeout_secs: 900,
             run_timeout_secs: 7200,
@@ -151,6 +166,18 @@ impl Config {
         }
         if let Some(v) = var("MOX_IONICE_BIN") {
             self.ionice_bin = v;
+        }
+        if let Some(v) = var("MOX_SSH_BIN") {
+            self.ssh_bin = v;
+        }
+        if let Some(v) = var("MOX_RSYNC_BIN") {
+            self.rsync_bin = v;
+        }
+        if let Some(v) = var("MOX_REMOTE_ROOT") {
+            self.remote_root = v;
+        }
+        if let Some(v) = var("MOX_REMOTE_OPENCODE_BIN") {
+            self.remote_opencode_bin = v;
         }
         if let Some(v) = var("MOX_SSH_ALIAS") {
             self.ssh_alias = v;
@@ -295,6 +322,10 @@ git_bin = {git_bin:?}
 taskset_bin = {taskset_bin:?}
 nice_bin = {nice_bin:?}
 ionice_bin = {ionice_bin:?}
+ssh_bin = {ssh_bin:?}
+rsync_bin = {rsync_bin:?}
+remote_root = {remote_root:?}
+remote_opencode_bin = {remote_opencode_bin:?}
 
 # VPS access (read-only checks by default, see `mox vps check`).
 ssh_alias = {ssh_alias:?}
@@ -307,6 +338,7 @@ nice_level = {nice_level}
 
 # Disk safety. Work refuses to start below min_free_disk_mb.
 min_free_disk_mb = {min_free_disk_mb}
+mem_per_agent_mb = {mem_per_agent_mb}
 project_disk_budget_mb = {project_disk_budget_mb}
 
 # Timeouts.
@@ -336,12 +368,17 @@ webhook_url = {webhook_url:?}
             taskset_bin = self.taskset_bin,
             nice_bin = self.nice_bin,
             ionice_bin = self.ionice_bin,
+            ssh_bin = self.ssh_bin,
+            rsync_bin = self.rsync_bin,
+            remote_root = self.remote_root,
+            remote_opencode_bin = self.remote_opencode_bin,
             ssh_alias = self.ssh_alias,
             agents_global = self.agents_global,
             max_parallel = self.max_parallel,
             reserve_cores = self.reserve_cores,
             nice_level = self.nice_level,
             min_free_disk_mb = self.min_free_disk_mb,
+            mem_per_agent_mb = self.mem_per_agent_mb,
             project_disk_budget_mb = self.project_disk_budget_mb,
             brain_timeout_secs = self.brain_timeout_secs,
             run_timeout_secs = self.run_timeout_secs,

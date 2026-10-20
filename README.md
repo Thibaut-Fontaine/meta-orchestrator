@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 238 unit tests + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 275 unit tests + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -40,6 +40,9 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
    `--watch` sidebar.
 7. **`mox vps check` / `mox vps suggest`** decide whether a workload fits the
    workstation, the existing VPS, or needs an OVHcloud remote plan.
+8. **`mox up --target vps`** runs approved projects on the VPS (rsync + ssh +
+   OpenCode) and fetches their commits back as a git bundle. `mox vps setup`
+   checks the remote prerequisites; no keys are ever copied.
 
 ## Install
 
@@ -99,10 +102,18 @@ Useful flags:
 | `mox up --no-github` | local work only, no repo creation |
 | `mox up --no-run` | scaffold + publish, launch nothing |
 | `mox up --max-parallel 3` | override concurrency |
+| `mox up --resume` / `--retry-failed` | skip completed / retry failed or stopped only |
+| `mox up --target vps` / `--target auto` | run on the VPS (approval required) / choose per project |
+| `mox up --owner ORG` | create the private repo under an org |
 | `mox --run-timeout 1800 up` | wall-clock cap per agent run (seconds) |
 | `mox status` | table with milestone progress and ETA |
 | `mox status --watch` | live table, refreshed every 10 s |
-| `mox stats` | cross-project milestone timing statistics (`--json` too) |
+| `mox stats` | cross-project milestone timing statistics (`--json`, `--reset --yes`) |
+| `mox status --verbose` | also print each project's `STATUS.md` |
+| `mox report [--out FILE]` | Markdown digest across all projects |
+| `mox project list` / `mox project archive <slug>` | list / move a workspace to `.mox/archive` |
+| `mox vps setup` | check rsync/git/opencode/disk on the VPS |
+| `mox vps plan --compute heavy` | OVHcloud provisioning checklist |
 | `mox milestone status` | detailed progress/ETA for the project in the current dir |
 | `mox milestone list` | milestones, todos, estimates, complexity, algorithms |
 | `mox milestone start m1` / `done m1 --note …` | record a transition |
@@ -115,6 +126,10 @@ Useful flags:
 | `mox check add "Verify cron" --project slug --due +2h --kind vps --priority high` | add/refresh a check |
 | `mox check later <id> 2h` | postpone a check |
 | `mox check done <id> --note "looked fine"` | complete a check |
+| `mox check remove <id>` / `reopen <id>` | delete / reopen a check |
+| `mox check export --format md\|json` | export the queue |
+| `mox check --top 3` | only the three most urgent checks |
+| `mox check daemon --interval 300` | periodic reminder loop |
 | `mox check sync` | import every project's `CHECKS.md` |
 | `mox check notify` | send a reminder digest (for a timer/cron) |
 | `mox clean --apply [--all]` | delete caches; `--all` also deletes `target/`, `dist/`, `build/` |
@@ -273,6 +288,26 @@ notifications are enabled. Agents are told to mark a milestone done only after
 its tests pass and the work is committed and pushed; the post-run check then
 verifies the tree is clean.
 
+## Remote execution (VPS / OVH)
+
+`mox up --target vps` mirrors an approved project to `~/mox-remote/<slug>` on
+the VPS with `rsync`, runs OpenCode there under a remote `timeout`, and brings
+the git history back as a bundle:
+
+1. one-time human approval: `mox vps allow <slug>`;
+2. `mox vps setup` must report `rsync`, `git` and `opencode` (plus the model auth
+   configured **on the VPS** — mox never copies keys or tokens);
+3. `mox up --target vps --only <slug>`; `--target auto` chooses per project and
+   falls back to local when approval/prerequisites are missing;
+4. remote commits are fetched into `refs/remotes/mox-remote/*`; a fast-forward
+   merge is attempted. If it does not fast-forward, the project is marked
+   `failed` with a "merge required" note — the workstation is never overwritten.
+
+A run that cannot fast-forward leaves the remote branch intact for review. The
+VPS is not cloned from GitHub and `gh` credentials are not needed there. Stop is
+local: killing `mox` aborts the ssh client, while the remote `timeout` is the
+hard guarantee; remote process cleanup is a known limitation.
+
 ## Safety rules (enforced, not just documented)
 
 * **Repositories are always private.** `gh repo create … --private` is the only
@@ -301,10 +336,20 @@ verifies the tree is clean.
 * **"Completed" means pushed.** After a run, `mox` checks for uncommitted files
   and commits ahead of `origin/main`; dirty or unpushed work marks the project
   `failed`.
+* **Agent boundaries are enforced twice.** Generated `opencode.json` denies
+  edits/reads outside the project, blocks `gh repo create/delete/edit`,
+  `gh api/auth`, force-push, ssh/scp, signals and service changes; per-project
+  PATH wrappers enforce the same rules for tools that bypass the model.
+* **Commits are checked before they exist.** A generated git pre-commit hook
+  rejects files over 2 MiB and obvious secret patterns (private keys, GitHub/
+  Slack/OpenAI/AWS tokens). Existing hooks are never overwritten.
+* **Ctrl-C is clean.** Agents get their own process group; SIGINT/SIGTERM kills
+  the group after a short grace period, saves a `stopped` status and clears pid
+  files. Stale `running` entries are flagged by `mox status`.
 * **VPS deployment needs a one-time human approval.** `mox vps allow <slug>`
   records it in state; agents cannot grant it. Direct `ssh` from agents is
-  blocked. (Remote execution itself is the M4 milestone; until then the approval
-  is recorded and surfaced by `mox status`.)
+  blocked. Remote execution uses that approval; without it, `--target vps`
+  refuses and `--target auto` stays local.
 * **VPS checks are read-only.** `mox vps check/suggest` runs only `nproc`,
   `hostname`, `free`, `df -Pm /` and `/proc/loadavg`. It never touches `nginx`,
   `instabot`, `llmcheck`, systemd, SSH or the firewall. OVH plans are
@@ -329,7 +374,9 @@ CPU:
 
 * the scheduler reserves cores (`reserve_cores`, default 1) and splits the rest
   into disjoint contiguous sets;
-* `max_parallel` (default: cores/2, capped at 4) agents run per wave;
+* a rolling pool keeps `max_parallel` agents busy (no wave barrier); heavy
+  projects reduce concurrency, and `MemAvailable / mem_per_agent_mb` caps it;
+* compute class decides the minimum core share (light 1, medium 2, heavy/GPU 4);
 * each agent is pinned with `taskset -c …`, runs at `nice 10` and `ionice -c 3`,
   so the desktop stays usable;
 * heavy/GPU projects print a pointer to `mox vps suggest` before starting.
@@ -377,10 +424,15 @@ nice_bin = "nice"
 ionice_bin = "ionice"
 ssh_alias = "vps-ovh"
 agents_global = "~/AGENTS-GLOBAL.md"
+ssh_bin = "ssh"
+rsync_bin = "rsync"
+remote_root = "~/mox-remote"
+remote_opencode_bin = "opencode"
 max_parallel = 4
 reserve_cores = 1
 nice_level = 10
 min_free_disk_mb = 2048
+mem_per_agent_mb = 768
 project_disk_budget_mb = 4096
 brain_timeout_secs = 900
 run_timeout_secs = 7200   # wall-clock cap per agent run
@@ -422,6 +474,8 @@ prior.
 | `verify` | post-run dirty-tree / unpushed-commit verification |
 | `milestones` | boards, transitions, weighted progress and ETA |
 | `stats` | cross-project timing history and the first-milestone prior |
+| `remote` | rsync/ssh run, git bundle fetch-back, remote preflight |
+| `hooks` | pre-commit guard for large files and secrets |
 | `host` | CPU model/cores/GHz/RAM passed to the planner |
 | `notify` | Telegram, desktop and webhook channels (secrets out of argv) |
 | `app` / `cli` | commands and argument parsing |
@@ -429,7 +483,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 238 unit + 8 end-to-end tests
+cargo test                 # 275 unit + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

@@ -644,6 +644,7 @@ mod tests {
                 samples: 3,
                 mean_ratio: 1.3,
                 median_ratio: 1.2,
+                p90_ratio: 1.5,
             },
         );
         let summary = Summary {
@@ -652,6 +653,7 @@ mod tests {
                 samples: 3,
                 mean_ratio: 1.3,
                 median_ratio: 1.2,
+                p90_ratio: 1.5,
             },
             by_complexity,
         };

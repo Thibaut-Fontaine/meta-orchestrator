@@ -64,6 +64,7 @@ pub struct Bucket {
     pub samples: usize,
     pub mean_ratio: f64,
     pub median_ratio: f64,
+    pub p90_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
@@ -152,10 +153,14 @@ fn bucket(mut ratios: Vec<f64>) -> Bucket {
     } else {
         (ratios[samples / 2 - 1] + ratios[samples / 2]) / 2.0
     };
+    let p90_index = ((samples as f64 * 0.9).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples - 1);
     Bucket {
         samples,
         mean_ratio: mean,
         median_ratio: median,
+        p90_ratio: ratios[p90_index],
     }
 }
 
@@ -264,13 +269,13 @@ pub fn render(summary: &Summary) -> String {
         summary.samples, summary.overall.median_ratio, summary.overall.mean_ratio
     );
     out.push_str(&format!(
-        "{:<10} {:>8} {:>10} {:>10}\n",
-        "complexity", "samples", "median", "mean"
+        "{:<10} {:>8} {:>10} {:>10} {:>10}\n",
+        "complexity", "samples", "median", "mean", "p90"
     ));
     for (complexity, bucket) in &summary.by_complexity {
         out.push_str(&format!(
-            "{:<10} {:>8} {:>9.2}× {:>9.2}×\n",
-            complexity, bucket.samples, bucket.median_ratio, bucket.mean_ratio
+            "{:<10} {:>8} {:>9.2}× {:>9.2}× {:>9.2}×\n",
+            complexity, bucket.samples, bucket.median_ratio, bucket.mean_ratio, bucket.p90_ratio
         ));
     }
     out.push_str("\nNew projects start with the median ratio for their milestone mix,\n");
@@ -318,9 +323,11 @@ mod tests {
         assert_eq!(low.samples, 2);
         assert!((low.median_ratio - 1.25).abs() < 0.001);
         assert!((low.mean_ratio - 1.25).abs() < 0.001);
+        assert!((low.p90_ratio - 2.0).abs() < 0.001);
         let high = summary.by_complexity.get("high").unwrap();
         assert!((high.median_ratio - 3.0).abs() < 0.001);
         assert!((summary.overall.median_ratio - 2.0).abs() < 0.001);
+        assert!((summary.overall.p90_ratio - 3.0).abs() < 0.001);
     }
 
     #[test]
