@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod brain;
+pub mod checks;
 pub mod clean;
 pub mod cli;
 pub mod config;

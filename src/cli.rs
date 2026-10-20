@@ -139,6 +139,37 @@ pub enum Command {
         slug: String,
     },
 
+    /// Human attention queue: what to check now, what later, and when.
+    #[command(alias = "checks", alias = "attention")]
+    Check {
+        #[command(subcommand)]
+        action: Option<CheckAction>,
+
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+
+        /// One line, for a status bar.
+        #[arg(long)]
+        oneline: bool,
+
+        /// Refresh the dashboard continuously (Ctrl-C to quit).
+        #[arg(long)]
+        watch: bool,
+
+        /// Refresh interval in seconds.
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+
+        /// Include completed checks.
+        #[arg(long)]
+        all: bool,
+
+        /// Do not import CHECKS.md files from projects.
+        #[arg(long)]
+        no_sync: bool,
+    },
+
     /// Inspect the VPS or get an execution-target recommendation.
     Vps {
         #[command(subcommand)]
@@ -150,6 +181,56 @@ pub enum Command {
         /// Ideas file (`-` for stdin).
         file: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CheckAction {
+    /// Add a check (or refresh the open one with the same title).
+    Add {
+        /// What a human must verify.
+        title: String,
+
+        /// Project slug (defaults to the only project in the plan).
+        #[arg(long)]
+        project: Option<String>,
+
+        /// When to check: +2h, 30m, 3d, 1w, now or an RFC3339 timestamp.
+        #[arg(long)]
+        due: Option<String>,
+
+        /// vps, api, deploy, manual, data, security or other.
+        #[arg(long, default_value = "manual")]
+        kind: String,
+
+        /// low, normal, high or critical.
+        #[arg(long, default_value = "normal")]
+        priority: String,
+
+        /// Longer explanation shown under the check.
+        #[arg(long, default_value = "")]
+        detail: String,
+    },
+
+    /// Mark a check as done.
+    Done {
+        /// Check id (shown by `mox check`).
+        id: String,
+
+        /// Optional note about the outcome.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+
+    /// Reschedule a check (e.g. `mox check later a1b2c3d4 2h`).
+    Later {
+        /// Check id.
+        id: String,
+        /// New due date: +2h, 30m, 3d, 1w, now or RFC3339.
+        when: String,
+    },
+
+    /// Import every project's CHECKS.md into the queue.
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,6 +326,67 @@ mod tests {
             } => assert_eq!(compute, "heavy"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_check_commands() {
+        let cli = Cli::try_parse_from([
+            "mox",
+            "check",
+            "add",
+            "Verify fetcher",
+            "--project",
+            "demo",
+            "--due",
+            "+2h",
+            "--kind",
+            "vps",
+            "--priority",
+            "high",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Check {
+                action:
+                    Some(CheckAction::Add {
+                        title,
+                        project,
+                        due,
+                        kind,
+                        priority,
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(title, "Verify fetcher");
+                assert_eq!(project.as_deref(), Some("demo"));
+                assert_eq!(due.as_deref(), Some("+2h"));
+                assert_eq!(kind, "vps");
+                assert_eq!(priority, "high");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["mox", "check", "--json", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Check {
+                action: None,
+                json: true,
+                all: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "check", "later", "abc", "2h"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Check {
+                action: Some(CheckAction::Later { .. }),
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["mox", "attention"]).unwrap();
+        assert!(matches!(cli.command, Command::Check { .. }));
     }
 
     #[test]

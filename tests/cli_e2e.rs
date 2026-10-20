@@ -163,7 +163,13 @@ fn full_workflow_init_plan_up_status_clean() {
 
     // The project is a real git repository with the scaffold committed.
     let project = h.projects.join("demo");
-    for file in ["README.md", "AGENTS.md", "TASK.md", ".gitignore"] {
+    for file in [
+        "README.md",
+        "AGENTS.md",
+        "TASK.md",
+        "CHECKS.md",
+        ".gitignore",
+    ] {
         assert!(project.join(file).exists(), "missing {file}");
     }
     let tracked = Command::new("git")
@@ -268,4 +274,75 @@ fn plan_consumes_answers_file() {
 
     let plan = std::fs::read_to_string(h.state.join("plan.json")).unwrap();
     assert!(plan.contains("PostgreSQL"), "{plan}");
+}
+
+#[test]
+fn check_queue_imports_agent_files_and_manages_checks() {
+    let h = harness("PRIVATE");
+    let ideas = h.root.join("ideas.txt");
+    h.run_ok(&["init"]);
+    h.run_ok(&["plan", "--ideas", ideas.to_str().unwrap(), "--yes"]);
+
+    // Simulate an agent that recorded two human checks while working.
+    let project = h.projects.join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("CHECKS.md"),
+        "- [ ] Verify the fetcher cron started | due: +2h | kind: vps | priority: high | detail: systemctl status\n\
+         - [ ] Review the first data batch | due: +3d | kind: data\n",
+    )
+    .unwrap();
+
+    let view = h.run_ok(&["check"]);
+    assert!(view.contains("NOW (1)"), "{view}");
+    assert!(view.contains("SOON (1)"), "{view}");
+    assert!(view.contains("Verify the fetcher cron started"), "{view}");
+    assert!(view.contains("mox check done <id>"), "{view}");
+
+    let json = h.run_ok(&["check", "--json"]);
+    let views: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(views.as_array().unwrap().len(), 2);
+    assert!(views
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["bucket"] == "now" && v["kind"] == "vps"));
+
+    let line = h.run_ok(&["check", "--oneline"]);
+    assert!(line.starts_with("checks: "), "{line}");
+    assert!(line.contains("1 now"), "{line}");
+
+    // Add a critical check from the CLI, then postpone and complete it.
+    let added = h.run_ok(&[
+        "check",
+        "add",
+        "Check the API quota",
+        "--project",
+        "demo",
+        "--due",
+        "+30m",
+        "--kind",
+        "api",
+        "--priority",
+        "critical",
+    ]);
+    let id = added.split_whitespace().nth(1).unwrap().to_string();
+    let json = h.run_ok(&["check", "--json"]);
+    assert!(json.contains("Check the API quota"), "{json}");
+
+    let postponed = h.run_ok(&["check", "later", &id, "+5d"]);
+    assert!(postponed.contains("rescheduled"), "{postponed}");
+
+    let done = h.run_ok(&["check", "done", &id, "--note", "quota is fine"]);
+    assert!(done.contains("quota is fine"), "{done}");
+    let json = h.run_ok(&["check", "--json"]);
+    assert!(!json.contains("Check the API quota"), "{json}");
+    let all = h.run_ok(&["check", "--all"]);
+    assert!(all.contains("DONE"), "{all}");
+    assert!(all.contains("Check the API quota"), "{all}");
+
+    // The status table advertises the queue.
+    let status = h.run_ok(&["status"]);
+    assert!(status.contains("checks:"), "{status}");
+    assert!(status.contains("mox check"), "{status}");
 }

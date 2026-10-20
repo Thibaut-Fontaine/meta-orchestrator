@@ -24,6 +24,9 @@ over, `~/AGENTS-GLOBAL.md`, which still applies.
 4. `mox stop` must verify the process is an OpenCode agent before signalling it.
 5. Secrets are never read by the program. Authentication is delegated to `gh`
    and the existing SSH configuration.
+6. Human checks (`CHECKS.md`, `mox check`) must never contain tokens, keys or
+   personal data. The `CHECKS.md` line format is a public contract with agents:
+   keep it backwards compatible and covered by parser tests.
 
 ## Engineering rules
 

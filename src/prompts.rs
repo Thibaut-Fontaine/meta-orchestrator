@@ -141,7 +141,12 @@ pub fn execution_prompt(cfg: &Config, spec: &ProjectSpec) -> String {
             `DECISIONS.md`, and continue.\n\
          7. Do not delete unrelated files. Do not run system-wide upgrades, do not \
             reboot, and do not change SSH/firewall/nginx configuration.\n\
-         8. Finish by writing `STATUS.md` with: what works, what is untested, and \
+         8. Whenever the owner must verify something manually (VPS service or \
+            cron, API key/quota, deploy, data sample), append a line to \
+            `CHECKS.md`: `- [ ] <title> | due: +2h | kind: vps | priority: high | \
+            detail: <what to check>`. Use `due` to say when it should be checked. \
+            Never put secrets in it. `mox check` shows these to the owner.\n\
+         9. Finish by writing `STATUS.md` with: what works, what is untested, and \
             the three most valuable next steps.\n\n\
          ## Working notes\n\
          Environment: project directory is {path}. Use `git status` to see what is \
@@ -480,6 +485,8 @@ mod tests {
         assert!(prompt.contains("PRIVATE repository"));
         assert!(prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompt.contains("STATUS.md"));
+        assert!(prompt.contains("CHECKS.md"));
+        assert!(prompt.contains("due: +2h"));
         assert!(prompt.contains("/tmp/projects/tool"));
         assert!(prompt.contains("AGENTS-GLOBAL.md"));
     }

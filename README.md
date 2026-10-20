@@ -31,7 +31,11 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
    agent per project with `opencode run --auto`.
 4. **`mox status` / `mox logs` / `mox reflect`** follow progress; `mox clean`
    reclaims disk; `mox stop` stops one agent safely.
-5. **`mox vps check` / `mox vps suggest`** decide whether a workload fits the
+5. **`mox check`** is the human-attention queue: agents append what they cannot
+   verify (VPS cron, API key/quota, deploy, data sample) to `CHECKS.md`, and the
+   queue shows what to check **now, today, soon, later**, with a live
+   `--watch` sidebar.
+6. **`mox vps check` / `mox vps suggest`** decide whether a workload fits the
    workstation, the existing VPS, or needs an OVHcloud remote plan.
 
 ## Install
@@ -85,8 +89,51 @@ Useful flags:
 | `mox up --no-github` | local work only, no repo creation |
 | `mox up --no-run` | scaffold + publish, launch nothing |
 | `mox up --max-parallel 3` | override concurrency |
+| `mox check` (`mox attention`) | human checks ordered by when they are due |
+| `mox check --watch` | live sidebar, refreshed every 10 s (Ctrl-C to quit) |
+| `mox check --oneline` | one line for tmux/waybar/polybar |
+| `mox check --json` | machine-readable views with `bucket` and `due_in_seconds` |
+| `mox check add "Verify cron" --project slug --due +2h --kind vps --priority high` | add/refresh a check |
+| `mox check later <id> 2h` | postpone a check |
+| `mox check done <id> --note "looked fine"` | complete a check |
+| `mox check sync` | import every project's `CHECKS.md` |
 | `mox clean --apply [--all]` | delete caches; `--all` also deletes `target/`, `dist/`, `build/` |
 | `mox vps suggest --compute heavy` | target recommendation (local/VPS/OVH plan) |
+
+## Human check queue (the "sidebar")
+
+Projects that run fetchers, cron jobs, API clients or services on the VPS need a
+human sooner or later. Agents cannot verify those things, so they record them in
+`CHECKS.md` inside their project:
+
+```text
+- [ ] Verify the fetcher cron started | due: +2h | kind: vps | priority: high | detail: systemctl status
+- [ ] Review the first data batch | due: +3d | kind: data
+```
+
+`mox up` imports them after every run, and `mox check` refreshes them on demand.
+The dashboard buckets everything by **when** it must be checked:
+
+```
+CHECKS — 2026-10-20 15:04 UTC
+1 overdue · 2 now · 1 today · 3 later
+
+NOW (2)
+! a1b2c3d4  fetcher      vps       Verify the cron started          in 42m   high
+  e5f6a7b8  dashboard    api       Confirm the API quota            in 3h    normal
+  ... detail line
+
+TODAY (1)
+  ...
+```
+
+* `due` accepts `+30m`, `+2h`, `+3d`, `+1w`, `now`, or RFC3339; omit it for
+  "whenever".
+* `priority` can push an unscheduled check into **NOW** (`high`/`critical`).
+* `mox check --watch` refreshes the view in place (sidebar in a terminal pane);
+  `--oneline` is designed for a status bar; `--json` for scripts.
+* Completed checks stay visible with `--all` and are never re-opened by a stale
+  `CHECKS.md`.
 
 ## Safety rules (enforced, not just documented)
 
@@ -138,6 +185,7 @@ CPU:
 ├── <slug>/                  # independent git repo, private GitHub remote
 │   ├── AGENTS.md            # project rules for the agent
 │   ├── TASK.md              # spec, answers, definition of done
+│   ├── CHECKS.md            # human checks the agent requests
 │   ├── README.md
 │   └── .gitignore
 └── .mox/                    # never committed
@@ -151,6 +199,7 @@ CPU:
 ├── state.json               # statuses, cores, pids, repo URLs
 ├── plan.json                # cached specs
 ├── answers.toml             # editable answers
+├── checks.json              # human attention queue
 └── QUESTIONS.md
 ```
 
@@ -204,7 +253,7 @@ extra_instructions = ""
 Testing:
 
 ```bash
-cargo test                 # 127 unit + 4 end-to-end tests
+cargo test                 # 151 unit + 5 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

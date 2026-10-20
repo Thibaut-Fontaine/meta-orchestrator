@@ -3,8 +3,9 @@
 //! tests with no network, no GitHub and no OpenCode.
 
 use crate::brain::Brain;
+use crate::checks::{self, Check, CheckKind, Priority};
 use crate::clean;
-use crate::cli::{Command, VpsCommand};
+use crate::cli::{CheckAction, Command, VpsCommand};
 use crate::config::Config;
 use crate::exec::{CommandRunner, CommandSpec};
 use crate::github;
@@ -19,6 +20,7 @@ use crate::state::{self, State};
 use crate::util::{display_path, human_mb, now_rfc3339, tail_lines, truncate_chars};
 use crate::vps::{self, HostCapacity};
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,17 @@ impl Asker for ScriptedAsker {
     }
 }
 
+/// Display/refresh options for `mox check`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckOptions {
+    pub json: bool,
+    pub oneline: bool,
+    pub watch: bool,
+    pub interval: u64,
+    pub all: bool,
+    pub no_sync: bool,
+}
+
 pub struct App {
     pub cfg: Config,
     pub cfg_path: PathBuf,
@@ -138,6 +151,26 @@ impl App {
             Command::Reflect { slug, lines } => self.cmd_reflect(&slug, lines, out),
             Command::Clean { apply, all, force } => self.cmd_clean(apply, all, force, out),
             Command::Stop { slug } => self.cmd_stop(&slug, out),
+            Command::Check {
+                action,
+                json,
+                oneline,
+                watch,
+                interval,
+                all,
+                no_sync,
+            } => self.cmd_check(
+                action,
+                CheckOptions {
+                    json,
+                    oneline,
+                    watch,
+                    interval,
+                    all,
+                    no_sync,
+                },
+                out,
+            ),
             Command::Vps { action } => match action {
                 VpsCommand::Check => self.cmd_vps_check(out),
                 VpsCommand::Suggest { compute } => self.cmd_vps_suggest(&compute, out),
@@ -827,6 +860,22 @@ impl App {
                 out,
                 "\ndry run: no files created, no commands executed, no state written"
             )?;
+        } else {
+            // Agents may have recorded human checks while they worked.
+            let now = Utc::now();
+            let mut store = checks::load(&self.cfg.checks_file())?;
+            match checks::sync_projects(&mut store, &self.cfg.projects_root_path(), now) {
+                Ok(outcome) if outcome.total() > 0 => {
+                    checks::save(&self.cfg.checks_file(), &store)?;
+                    writeln!(
+                        out,
+                        "\nattention: {} new human check(s), {} refreshed — run `mox check`",
+                        outcome.created, outcome.updated
+                    )?;
+                }
+                Ok(_) => {}
+                Err(err) => writeln!(out, "warning: could not import CHECKS.md: {err:#}")?,
+            }
         }
         self.print_summary(&state, out)?;
         Ok(())
@@ -868,6 +917,13 @@ impl App {
             return Ok(());
         }
         let guard = DiskGuard::new(self.cfg.min_free_disk_mb, self.cfg.project_disk_budget_mb);
+        if let Ok(store) = checks::load(&self.cfg.checks_file()) {
+            writeln!(
+                out,
+                "{} (details: mox check)\n",
+                checks::oneline(&store, Utc::now())
+            )?;
+        }
         writeln!(
             out,
             "{:<28} {:<11} {:<8} {:<7} {:>9}  repo",
@@ -1067,6 +1123,165 @@ impl App {
         self.save_state(&state)?;
         writeln!(out, "sent SIGTERM to pid {pid} for `{slug}`")?;
         Ok(())
+    }
+
+    fn cmd_check(
+        &mut self,
+        action: Option<CheckAction>,
+        opts: CheckOptions,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut store = checks::load(&self.cfg.checks_file())?;
+        if !opts.no_sync {
+            let imported = checks::sync_projects(&mut store, &self.cfg.projects_root_path(), now)?;
+            if imported.total() > 0 {
+                checks::save(&self.cfg.checks_file(), &store)?;
+            }
+        }
+
+        match action {
+            Some(CheckAction::Add {
+                title,
+                project,
+                due,
+                kind,
+                priority,
+                detail,
+            }) => {
+                if title.trim().is_empty() {
+                    bail!("check title must not be empty");
+                }
+                let slug = self.resolve_project_slug(project)?;
+                let kind: CheckKind = kind.parse().map_err(|err: String| anyhow::anyhow!(err))?;
+                let priority: Priority = priority
+                    .parse()
+                    .map_err(|err: String| anyhow::anyhow!(err))?;
+                let due_at = checks::parse_due(due.as_deref().unwrap_or(""), now)?;
+                let check = Check::new(&slug, title.trim(), kind, priority, due_at, detail, now);
+                let id = store.add(check);
+                checks::save(&self.cfg.checks_file(), &store)?;
+                let added = store.get(&id).expect("just added");
+                writeln!(
+                    out,
+                    "added {} [{}] {} — {} ({})",
+                    id,
+                    added.kind.as_str(),
+                    added.title,
+                    checks::relative_label(added, now),
+                    added.priority.as_str()
+                )?;
+            }
+            Some(CheckAction::Done { id, note }) => {
+                store.mark_done(&id, &note, now)?;
+                checks::save(&self.cfg.checks_file(), &store)?;
+                let check = store.get(&id).expect("just marked done");
+                writeln!(
+                    out,
+                    "done {} [{}] {}{}",
+                    id,
+                    check.kind.as_str(),
+                    check.title,
+                    if note.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", note.trim())
+                    }
+                )?;
+            }
+            Some(CheckAction::Later { id, when }) => {
+                let due = checks::parse_due(&when, now)?;
+                store.reschedule(&id, due, now)?;
+                checks::save(&self.cfg.checks_file(), &store)?;
+                let check = store.get(&id).expect("just rescheduled");
+                writeln!(
+                    out,
+                    "rescheduled {} — {} ({})",
+                    id,
+                    check.title,
+                    checks::relative_label(check, now)
+                )?;
+            }
+            Some(CheckAction::Sync) => {
+                // An explicit `sync` always imports, even with --no-sync.
+                let outcome =
+                    checks::sync_projects(&mut store, &self.cfg.projects_root_path(), now)?;
+                checks::save(&self.cfg.checks_file(), &store)?;
+                writeln!(
+                    out,
+                    "imported {} new check(s), {} refreshed ({} open total)",
+                    outcome.created,
+                    outcome.updated,
+                    store.open().len()
+                )?;
+            }
+            None => {
+                if opts.watch {
+                    return self.watch_checks(opts.interval, out);
+                }
+                if opts.json {
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::to_string_pretty(&checks::views(&store, now))?
+                    )?;
+                } else if opts.oneline {
+                    writeln!(out, "{}", checks::oneline(&store, now))?;
+                } else {
+                    write!(out, "{}", checks::render(&store, now, opts.all))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Live sidebar. Reloads and re-imports on every tick so agent-written
+    /// checks appear without restarting.
+    fn watch_checks(&self, interval: u64, out: &mut dyn Write) -> Result<()> {
+        let interval = interval.max(1);
+        loop {
+            let now = Utc::now();
+            let mut store = checks::load(&self.cfg.checks_file())?;
+            let _ = checks::sync_projects(&mut store, &self.cfg.projects_root_path(), now);
+            write!(out, "\x1b[2J\x1b[H")?;
+            write!(out, "{}", checks::render(&store, now, false))?;
+            writeln!(out, "\nrefreshing every {interval}s — Ctrl-C to quit")?;
+            out.flush()?;
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        }
+    }
+
+    fn resolve_project_slug(&self, requested: Option<String>) -> Result<String> {
+        if let Some(slug) = requested {
+            let state = self.load_state()?;
+            if state.project(&slug).is_none() && !self.cfg.projects_root_path().join(&slug).is_dir()
+            {
+                let known: Vec<&str> = state.projects.keys().map(String::as_str).collect();
+                bail!(
+                    "unknown project `{slug}`{}",
+                    if known.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; known: {}", known.join(", "))
+                    }
+                );
+            }
+            return Ok(slug);
+        }
+        let state = self.load_state()?;
+        match state.projects.len() {
+            0 => bail!("no projects yet; run `mox plan` then `mox up`"),
+            1 => Ok(state.projects.keys().next().expect("one project").clone()),
+            _ => bail!(
+                "several projects exist; pass `--project <slug>` (known: {})",
+                state
+                    .projects
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
     }
 
     fn cmd_vps_check(&mut self, out: &mut dyn Write) -> Result<()> {
@@ -1438,6 +1653,232 @@ mod tests {
         let mut out = Vec::new();
         app.cmd_logs("demo", 2, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "b\nc\n");
+    }
+
+    fn call_check(
+        app: &mut App,
+        action: Option<CheckAction>,
+        json: bool,
+        oneline: bool,
+        all: bool,
+        no_sync: bool,
+    ) -> (String, Result<()>) {
+        let mut out = Vec::new();
+        let result = app.cmd_check(
+            action,
+            CheckOptions {
+                json,
+                oneline,
+                watch: false,
+                interval: 10,
+                all,
+                no_sync,
+            },
+            &mut out,
+        );
+        (String::from_utf8(out).unwrap(), result)
+    }
+
+    fn state_with_demo(app: &App) {
+        let mut state = State::default();
+        state.upsert(ProjectState::new(
+            "demo",
+            "Demo",
+            &app.cfg
+                .projects_root_path()
+                .join("demo")
+                .display()
+                .to_string(),
+        ));
+        app.save_state(&state).unwrap();
+    }
+
+    #[test]
+    fn check_add_list_later_and_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+
+        let (out, result) = call_check(
+            &mut app,
+            Some(CheckAction::Add {
+                title: "Verify the fetcher cron ran".into(),
+                project: None,
+                due: Some("+2h".into()),
+                kind: "vps".into(),
+                priority: "high".into(),
+                detail: "check systemctl and logs".into(),
+            }),
+            false,
+            false,
+            false,
+            true,
+        );
+        result.unwrap();
+        assert!(out.contains("added "), "{out}");
+        let id = out.split_whitespace().nth(1).unwrap().to_string();
+
+        let (list, _) = call_check(&mut app, None, false, false, false, true);
+        assert!(list.contains("NOW (1)"), "{list}");
+        assert!(list.contains("Verify the fetcher cron ran"));
+        assert!(list.contains("mox check done <id>"));
+
+        let (out, _) = call_check(
+            &mut app,
+            Some(CheckAction::Later {
+                id: id.clone(),
+                when: "+3d".into(),
+            }),
+            false,
+            false,
+            false,
+            true,
+        );
+        assert!(out.contains("rescheduled"), "{out}");
+        let (list, _) = call_check(&mut app, None, false, false, false, true);
+        assert!(list.contains("SOON (1)"), "{list}");
+
+        let (out, _) = call_check(
+            &mut app,
+            Some(CheckAction::Done {
+                id: id.clone(),
+                note: "looked fine".into(),
+            }),
+            false,
+            false,
+            false,
+            true,
+        );
+        assert!(out.contains("looked fine"), "{out}");
+        let (list, _) = call_check(&mut app, None, false, false, false, true);
+        assert!(list.contains("nothing to check"), "{list}");
+        let (with_done, _) = call_check(&mut app, None, false, false, true, true);
+        assert!(with_done.contains("DONE (1)"), "{with_done}");
+    }
+
+    #[test]
+    fn check_sync_imports_agent_file_and_reports_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let project = app.cfg.projects_root_path().join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("CHECKS.md"),
+            "- [ ] Check API quota | due: +1d | kind: api | priority: normal\n",
+        )
+        .unwrap();
+
+        let (json, _) = call_check(&mut app, None, true, false, false, false);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["title"], "Check API quota");
+        assert_eq!(value[0]["bucket"], "today");
+        assert_eq!(value[0]["kind"], "api");
+        assert!(app.cfg.checks_file().exists());
+
+        let (line, _) = call_check(&mut app, None, false, true, false, true);
+        assert!(line.starts_with("checks: "), "{line}");
+
+        let (sync, _) = call_check(&mut app, Some(CheckAction::Sync), false, false, false, true);
+        assert!(sync.contains("0 new check(s), 1 refreshed"), "{sync}");
+    }
+
+    #[test]
+    fn check_requires_project_when_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let mut state = State::default();
+        for slug in ["a", "b"] {
+            state.upsert(ProjectState::new(slug, slug, "/tmp/x"));
+        }
+        app.save_state(&state).unwrap();
+        let (_, result) = call_check(
+            &mut app,
+            Some(CheckAction::Add {
+                title: "x".into(),
+                project: None,
+                due: None,
+                kind: "manual".into(),
+                priority: "normal".into(),
+                detail: String::new(),
+            }),
+            false,
+            false,
+            false,
+            true,
+        );
+        assert!(result.unwrap_err().to_string().contains("several projects"));
+
+        let (out, result) = call_check(
+            &mut app,
+            Some(CheckAction::Add {
+                title: "x".into(),
+                project: Some("a".into()),
+                due: None,
+                kind: "nope".into(),
+                priority: "normal".into(),
+                detail: String::new(),
+            }),
+            false,
+            false,
+            false,
+            true,
+        );
+        assert!(out.is_empty());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unknown check kind"));
+    }
+
+    #[test]
+    fn status_shows_attention_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        state_with_demo(&app);
+        let mut store = checks::CheckStore::default();
+        store.add(Check::new(
+            "demo",
+            "Verify cron",
+            CheckKind::Vps,
+            Priority::High,
+            Some(Utc::now() + chrono::Duration::hours(1)),
+            "",
+            Utc::now(),
+        ));
+        checks::save(&app.cfg.checks_file(), &store).unwrap();
+        let mut out = Vec::new();
+        app.cmd_status(false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("checks: 1 now"), "{text}");
+        assert!(text.contains("details: mox check"));
+    }
+
+    #[test]
+    fn up_imports_checks_written_in_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        app.ensure_layout().unwrap();
+        let project = app.cfg.projects_root_path().join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("CHECKS.md"),
+            "- [ ] Verify VPS service | due: +2h | kind: vps | priority: high\n",
+        )
+        .unwrap();
+        write_plan(&app, vec![spec("demo")]);
+        let mut out = Vec::new();
+        app.cmd_up(vec![], Some(1), true, false, false, &mut out)
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("attention: 1 new human check"), "{text}");
+        let store = checks::load(&app.cfg.checks_file()).unwrap();
+        assert_eq!(store.open().len(), 1);
+        assert_eq!(store.checks[0].title, "Verify VPS service");
     }
 
     #[test]

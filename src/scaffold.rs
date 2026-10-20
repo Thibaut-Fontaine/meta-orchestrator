@@ -83,6 +83,33 @@ credentials*
 Thumbs.db
 "#;
 
+const CHECKS_MD: &str = r#"# CHECKS.md — human checks
+
+`mox check` imports the open items below into the attention queue (nothing else
+in this file is parsed). Add a line whenever a human must verify something the
+agent cannot: a VPS service or cron, an API key/quota, a deploy, a data sample.
+
+Format — one check per line, only the title is required:
+
+```text
+- [ ] Short imperative title | due: +2h | kind: vps | priority: high | detail: what to look at
+```
+
+* `due`: `+30m`, `+2h`, `+3d`, `+1w`, `now`, or an RFC3339 timestamp. Omit for
+  "whenever you get to it".
+* `kind`: `vps`, `api`, `deploy`, `manual`, `data`, `security`, `other`.
+* `priority`: `low`, `normal`, `high`, `critical`.
+* `detail`: one extra sentence, no secrets.
+
+Rules:
+
+* Never put tokens, keys, passwords or personal data in this file.
+* Mark a line `- [x]` only after the human confirmed; `mox` ignores those.
+* Keep titles short and actionable ("Verify the fetcher cron ran", not "VPS").
+* Re-running sync refreshes an open item with the same title; done items stay
+  done.
+"#;
+
 const AGENTS_MD: &str = r#"# AGENTS.md — project rules
 
 This project was scaffolded by `mox` (meta-orchestrator) and is worked on by an
@@ -105,6 +132,10 @@ are stricter.
 6. **Commits.** Small, focused commits with meaningful messages.
 7. **Unattended.** Do not ask interactive questions. Decide, write the decision
    in `DECISIONS.md`, and continue.
+8. **Human checks.** When something needs a human (VPS service/cron, API key or
+   quota, deploy, data sample), add a line to `CHECKS.md` in the documented
+   format. `mox check` shows these to the owner, ordered by time. Never put
+   secrets or personal data in that file.
 
 ## Definition of done
 
@@ -132,6 +163,7 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
         ("AGENTS.md", AGENTS_MD.to_string()),
         (".gitignore", GITIGNORE.to_string()),
         ("TASK.md", task_markdown(cfg, spec)),
+        ("CHECKS.md", CHECKS_MD.to_string()),
     ];
     for (name, content) in files {
         let file = path.join(name);
@@ -280,12 +312,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scaffolding = scaffold_project(&cfg(dir.path()), &spec()).unwrap();
         assert!(!scaffolding.existed);
-        assert_eq!(scaffolding.created.len(), 4);
+        assert_eq!(scaffolding.created.len(), 5);
         let project = dir.path().join("demo");
         assert!(project.join("README.md").exists());
         assert!(project.join("AGENTS.md").exists());
         assert!(project.join(".gitignore").exists());
         assert!(project.join("TASK.md").exists());
+        assert!(project.join("CHECKS.md").exists());
         let task = std::fs::read_to_string(project.join("TASK.md")).unwrap();
         assert!(task.contains("PostgreSQL"));
         assert!(task.contains("Private repository"));
@@ -306,6 +339,14 @@ mod tests {
         );
         // Missing files are still created.
         assert!(project.join("TASK.md").exists());
+    }
+
+    #[test]
+    fn checks_file_documents_the_format() {
+        assert!(CHECKS_MD.contains("- [ ]"));
+        assert!(CHECKS_MD.contains("due:"));
+        assert!(CHECKS_MD.contains("Never put tokens"));
+        assert!(AGENTS_MD.contains("`CHECKS.md`"));
     }
 
     #[test]

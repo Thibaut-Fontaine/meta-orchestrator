@@ -209,6 +209,11 @@ impl Config {
         self.state_dir_path().join("answers.toml")
     }
 
+    /// Global human-attention queue (`mox check`).
+    pub fn checks_file(&self) -> PathBuf {
+        self.state_dir_path().join("checks.json")
+    }
+
     pub fn questions_file(&self) -> PathBuf {
         self.state_dir_path().join("QUESTIONS.md")
     }
