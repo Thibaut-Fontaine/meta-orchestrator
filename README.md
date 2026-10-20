@@ -56,6 +56,8 @@ Add it to `PATH` if you like:
 install -m 755 target/release/mox ~/.local/bin/mox
 ```
 
+The planned work from v0.1 to v1.0 is tracked in [ROADMAP.md](ROADMAP.md).
+
 ## Quick start
 
 ```bash
