@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 336 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 337 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -253,6 +253,8 @@ $10 -> $5 -> $3 -> $2 -> $1 -> $0.50
   It is only written to a 0600 curl config file, never argv or logs.
 - State lives in `~/.local/state/meta-orchestrator/deepseek-balance.json`.
   A top-up releases the thresholds so a later drop can notify again.
+- Every mox Telegram notification (and every bridge completion notification)
+  appends the last known line: `DeepSeek: $7.74 USD left (checked … UTC)`.
 - The included user timer `contrib/mox-balance.timer` runs every 30 minutes.
   Install it with:
 
@@ -709,7 +711,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 336 unit + 4 property + 8 end-to-end tests
+cargo test                 # 337 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

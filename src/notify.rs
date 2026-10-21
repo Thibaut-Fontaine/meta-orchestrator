@@ -220,7 +220,14 @@ impl Notifier for TelegramNotifier {
         let conf_path = dir.join(format!("telegram-{stamp}.conf"));
         let _cleanup = TempFiles(vec![body_path.clone(), conf_path.clone()]);
 
-        crate::util::write_private(&body_path, truncate(event.text(), 3800))?;
+        let mut text = event.text();
+        if event.kind != EventKind::Balance {
+            if let Some(footer) = balance_footer(&self.state_dir) {
+                text.push_str("\n\n");
+                text.push_str(&footer);
+            }
+        }
+        crate::util::write_private(&body_path, truncate(text, 3800))?;
         let conf = format!(
             "url = \"https://api.telegram.org/bot{token}/sendMessage\"\n\
              data-urlencode = \"chat_id={chat}\"\n\
@@ -420,6 +427,38 @@ fn curl_escape(value: &str) -> String {
         .replace(['\n', '\r'], " ")
 }
 
+/// A compact footer from the last `mox balance` state. It is deliberately a
+/// read-only snapshot: notifications should not make a network call.
+fn balance_footer(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join("deepseek-balance.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let total = value
+        .get("last_balance")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            value
+                .get("last_balance")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<f64>().ok())
+        })?;
+    let currency = value
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("USD");
+    let checked = value
+        .get("checked_at")
+        .and_then(|v| v.as_str())
+        .map(|value| {
+            let compact: String = value.replace('T', " ").chars().take(16).collect();
+            format!("{compact} UTC")
+        })
+        .unwrap_or_else(|| "unknown time".to_string());
+    Some(format!(
+        "DeepSeek: ${total:.2} {currency} left (checked {checked})"
+    ))
+}
+
 pub fn channel_names(notifier: &dyn Notifier) -> String {
     let names = notifier.describe();
     if names.is_empty() {
@@ -545,6 +584,39 @@ mod tests {
         .with_token_file(token_file);
         notifier.send(&event()).unwrap();
         assert!(seen.lock().unwrap().contains("file-secret"));
+    }
+
+    #[test]
+    fn telegram_appends_the_last_known_balance() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("deepseek-balance.json"),
+            r#"{"last_balance":7.74,"currency":"USD","checked_at":"2026-10-21T15:53:00Z"}"#,
+        )
+        .unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_for_test = seen.clone();
+        let runner = Arc::new(FakeRunner::new(move |spec| {
+            let conf = &spec.args[spec.args.len() - 1];
+            let text = std::fs::read_to_string(conf).unwrap();
+            if let Some(line) = text.lines().find(|l| l.contains("text@")) {
+                let path = line.split("text@").nth(1).unwrap().trim_end_matches('"');
+                *seen_for_test.lock().unwrap() = std::fs::read_to_string(path).unwrap();
+            }
+            Output {
+                code: Some(0),
+                stdout: r#"{"ok":true}"#.into(),
+                ..Output::default()
+            }
+        }));
+        let env_name = format!("MOX_TEST_TG_FOOTER_{}", std::process::id());
+        std::env::set_var(&env_name, "secret-token");
+        let notifier = TelegramNotifier::new(runner, &env_name, "1", dir.path().to_path_buf());
+        notifier.send(&event()).unwrap();
+        std::env::remove_var(&env_name);
+        let body = seen.lock().unwrap().clone();
+        assert!(body.contains("DeepSeek: $7.74 USD left"));
+        assert!(body.contains("2026-10-21 15:53 UTC"));
     }
 
     #[test]

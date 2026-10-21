@@ -18,6 +18,8 @@
 - `mox balance [--json] [--notify]` checks the linked DeepSeek credit and
   notifies once per newly crossed $10/$5/$3/$2/$1/$0.50 threshold. The key and
   Telegram token stay in 0600 files; a user timer checks every 30 minutes.
+- Every mox Telegram notification and every bridge completion notification now
+  appends the last known DeepSeek balance line.
 - Every project gets `MANUAL.md` and a "Continue without mox" README section;
   `AGENTS.md` documents direct `MILESTONES.json` edits when mox is unavailable.
 

@@ -31,13 +31,17 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 BRIDGE_DIR = CONFIG_HOME / "opencode" / "telegram-bridge"
 CONFIG_PATH = Path(os.environ.get("OPENCODE_TELEGRAM_CONFIG") or (BRIDGE_DIR / "config.json"))
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
 STATE_PATH = Path(os.environ.get("OPENCODE_TELEGRAM_STATE") or (STATE_HOME / "opencode-telegram-bridge" / "state.json"))
+BALANCE_STATE_PATH = Path(
+    os.environ.get("MOX_BALANCE_STATE")
+    or (STATE_HOME / "meta-orchestrator" / "deepseek-balance.json")
+)
 
 DEFAULT_CONFIG = {
     "botToken": "",
@@ -548,6 +552,25 @@ class Telegram:
 
 # ---------------------------------------------------------------------------
 # bridge
+
+
+def balance_footer(path: Path | None = None) -> str:
+    """Return a compact footer from the mox balance state, or an empty string."""
+    state_path = path or BALANCE_STATE_PATH
+    try:
+        payload = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    total = payload.get("last_balance")
+    if total is None:
+        return ""
+    try:
+        total = float(total)
+    except (TypeError, ValueError):
+        return ""
+    currency = str(payload.get("currency") or "USD")
+    checked = str(payload.get("checked_at") or "unknown time").replace("T", " ")[:16]
+    return f"DeepSeek: ${total:.2f} {currency} left (checked {checked} UTC)"
 
 
 HELP_TEXT = """<b>OpenCode Telegram bridge</b>
@@ -1389,6 +1412,12 @@ class Bridge:
         if self.tg.chat_id is None:
             log.info("no chat paired yet; dropping notification")
             return
+        # Completion/error notifications carry the last known DeepSeek balance.
+        # Forms and permissions stay short and do not get the footer.
+        if session_id is not None:
+            footer = balance_footer()
+            if footer:
+                text = f"{text}\n\n{footer}"
         self.outbox.put((text, session_id, keyboard, permission_token, form_token))
 
     # -- Telegram ---------------------------------------------------------

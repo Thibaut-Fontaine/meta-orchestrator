@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 import bridge
 
@@ -303,3 +306,24 @@ class FormFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BalanceFooterTests(unittest.TestCase):
+    def test_balance_footer_uses_the_last_mox_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deepseek-balance.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "last_balance": 7.74,
+                        "currency": "USD",
+                        "checked_at": "2026-10-21T15:53:00Z",
+                    }
+                )
+            )
+            footer = bridge.balance_footer(path)
+            self.assertIn("DeepSeek: $7.74 USD left", footer)
+            self.assertIn("2026-10-21 15:53 UTC", footer)
+
+    def test_missing_balance_state_is_silent(self) -> None:
+        self.assertEqual(bridge.balance_footer(Path("/nonexistent/balance.json")), "")

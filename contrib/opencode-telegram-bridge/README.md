@@ -77,6 +77,9 @@ Important implementation details:
   go to the session selected with `/use`.
 - **Event IDs and Telegram `update_id` are persisted** to avoid duplicate
   notifications and replayed prompts after a restart.
+- **Completion notifications append the last known DeepSeek balance** from
+  `~/.local/state/meta-orchestrator/deepseek-balance.json`; forms and permission
+  prompts stay short. This is a read-only snapshot, not a new API call.
 - **Pending form and permission routes are persisted** in `state.json`, so a
   bridge restart does not invalidate buttons already sent. On startup, and on
   `/pending`, the bridge scans recent sessions for questions it missed.
