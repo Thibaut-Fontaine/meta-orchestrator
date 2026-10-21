@@ -51,6 +51,11 @@ Only prose here. Another sentence.
     def test_empty_summary_is_just_the_title(self) -> None:
         self.assertEqual(bridge.finished_text("Title", ""), "✅ <b>Title</b>")
 
+    def test_internal_planning_sessions_are_filtered(self) -> None:
+        self.assertTrue(bridge.is_internal_session_title("mox: planning"))
+        self.assertTrue(bridge.is_internal_session_title(" MOX: Planning "))
+        self.assertFalse(bridge.is_internal_session_title("Fix login"))
+
 
 class QuestionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -135,6 +140,9 @@ class FakeOpenCode:
     def __init__(self) -> None:
         self.replied = []
         self.cancelled = []
+
+    def session(self, session_id):
+        return {"id": session_id, "title": "Test session"}
 
     def form(self, session_id, form_id):
         return None

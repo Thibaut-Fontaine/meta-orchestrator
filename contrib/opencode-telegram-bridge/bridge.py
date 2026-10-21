@@ -329,6 +329,11 @@ def finished_text(title: str, text: str, failed: bool = False) -> str:
     return "\n".join(lines)
 
 
+def is_internal_session_title(title: str) -> bool:
+    """Planning/reflection calls are mox internals, not user-facing tasks."""
+    return str(title or "").strip().lower().startswith("mox: planning")
+
+
 def esc(value) -> str:
     """Escape text for Telegram HTML parse mode."""
     return html.escape(str(value), quote=False)
@@ -774,6 +779,8 @@ class Bridge:
             log.debug("could not read recent messages for %s: %s", session_id, exc)
 
         title = session.get("title") or session_id
+        if is_internal_session_title(str(title)):
+            return
         failed = session.get("outcome") == "failed"
         self.enqueue(finished_text(title, summary, failed), session_id=session_id)
 
@@ -909,6 +916,12 @@ class Bridge:
     def notify_form(self, form: dict):
         form_id = str(form.get("id") or "")
         session_id = str(form.get("sessionID") or "")
+        try:
+            session = self.oc.session(session_id)
+            if is_internal_session_title(session.get("title") or ""):
+                return
+        except ApiError:
+            pass
         try:
             detail = self.oc.form(session_id, form_id)
             if isinstance(detail, dict) and detail.get("fields"):
