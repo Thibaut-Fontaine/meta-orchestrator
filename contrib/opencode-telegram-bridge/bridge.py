@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """OpenCode -> Telegram bridge.
 
-Watches the OpenCode server event stream and sends a Telegram message when a
-session finishes, needs permission, or fails. Replying to one of those messages
-forwards the text back to the same session as the next prompt.
+Watches the OpenCode server event stream and sends a short Telegram message when
+a session finishes or needs input (permission or form question). Replies to
+finished messages become the next prompt; replies to questions answer the
+pending request.
 
 Only the Python standard library is used.
 """
@@ -29,7 +30,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 BRIDGE_DIR = CONFIG_HOME / "opencode" / "telegram-bridge"
@@ -42,10 +43,16 @@ DEFAULT_CONFIG = {
     "chatID": None,
     "server": None,
     "password": None,
-    "notify": {"finished": True, "permission": True, "error": True, "interrupted": False},
+    "notify": {
+        "finished": True,
+        "permission": True,
+        "form": True,
+        "error": False,
+        "interrupted": False,
+    },
     "includeSubagents": False,
-    "summaryChars": 600,
-    "replyConfirmation": True,
+    "summaryChars": 280,
+    "replyConfirmation": False,
 }
 
 DEFAULT_STATE = {
@@ -200,6 +207,128 @@ def shorten(value: str, limit: int) -> str:
     return value[: max(0, limit - 1)].rstrip() + "\u2026"
 
 
+def strip_markdown(value: str) -> str:
+    """Turn a small Markdown snippet into plain text."""
+    value = value or ""
+    value = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", value)
+    value = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = re.sub(r"[*_`~]+", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def first_sentence(value: str, limit: int = 120) -> str:
+    value = strip_markdown(value)
+    if not value:
+        return ""
+    match = re.match(r"(.+?[.!?])(?:\s|$)", value)
+    if match:
+        value = match.group(1)
+    if len(value) > limit:
+        value = value[: max(0, limit - 1)].rstrip() + "\u2026"
+    return value.strip(" \t-:;")
+
+
+def point_title(value: str, limit: int = 90) -> str:
+    """Keep a heading-like title, not the paragraph below it."""
+    value = first_sentence(value, limit)
+    if ":" in value:
+        head = value.split(":", 1)[0].strip()
+        if 2 <= len(head) <= 60:
+            value = head
+    return value.strip(" \t-:;.")
+
+
+def compact_text(value: str, max_sentences: int = 3, limit: int = 300) -> str:
+    """Plain text with at most a few sentences and a hard character cap."""
+    value = strip_markdown(value)
+    if not value:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", value)
+    value = " ".join(sentences[: max(1, max_sentences)]).strip()
+    if len(value) > limit:
+        value = value[: max(0, limit - 1)].rstrip() + "\u2026"
+    return value
+
+
+GENERIC_POINTS = {
+    "summary",
+    "overview",
+    "notes",
+    "note",
+    "result",
+    "results",
+    "details",
+    "changes",
+    "what changed",
+    "status",
+}
+
+
+def extract_points(text: str, limit: int = 3) -> list[str]:
+    """Extract short headings or bullet titles from the final assistant text.
+
+    Falls back to the first few sentences when the answer is plain prose.
+    """
+    points: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        candidate = None
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", stripped)
+        if heading:
+            candidate = heading.group(1)
+        else:
+            bold_line = re.match(r"^(?:\*\*|__)(.+?)(?:\*\*|__)\s*:?\s*$", stripped)
+            if bold_line:
+                candidate = bold_line.group(1)
+            else:
+                bullet = re.match(r"^(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+                if bullet:
+                    item = bullet.group(1)
+                    bold = re.match(r"^(?:\*\*|__)(.+?)(?:\*\*|__)", item)
+                    candidate = bold.group(1) if bold else item
+        if not candidate:
+            continue
+        candidate = point_title(candidate)
+        if not candidate:
+            continue
+        if candidate.casefold() in GENERIC_POINTS:
+            continue
+        if candidate.casefold() in {point.casefold() for point in points}:
+            continue
+        points.append(candidate)
+        if len(points) >= limit:
+            break
+
+    if points:
+        return points[:limit]
+
+    plain = strip_markdown(text)
+    for generic in GENERIC_POINTS:
+        plain = re.sub(rf"^{re.escape(generic)}\b[:\s-]*", "", plain, flags=re.IGNORECASE)
+    plain = plain.strip()
+    if not plain:
+        return []
+    result = []
+    for sentence in re.split(r"(?<=[.!?])\s+", plain)[:limit]:
+        sentence = first_sentence(sentence, 100).rstrip(" .;:")
+        if sentence:
+            result.append(sentence)
+    return result
+
+
+def finished_text(title: str, text: str, failed: bool = False) -> str:
+    """Title plus up to three main point titles; nothing else."""
+    icon = "\u26a0\ufe0f" if failed else "\u2705"
+    lines = [f"{icon} <b>{esc(shorten(strip_markdown(title), 120))}</b>"]
+    for point in extract_points(text, 3):
+        lines.append(f"\u2022 {esc(point)}")
+    return "\n".join(lines)
+
+
 def esc(value) -> str:
     """Escape text for Telegram HTML parse mode."""
     return html.escape(str(value), quote=False)
@@ -304,6 +433,25 @@ class OpenCode:
     def interrupt(self, session_id: str):
         return self.request("POST", f"/api/session/{quote_id(session_id)}/interrupt")
 
+    def form(self, session_id: str, form_id: str):
+        return self.request(
+            "GET",
+            f"/api/session/{quote_id(session_id)}/form/{quote_id(form_id)}",
+        )
+
+    def reply_form(self, session_id: str, form_id: str, answer: dict):
+        return self.request(
+            "POST",
+            f"/api/session/{quote_id(session_id)}/form/{quote_id(form_id)}/reply",
+            {"answer": answer},
+        )
+
+    def cancel_form(self, session_id: str, form_id: str):
+        return self.request(
+            "DELETE",
+            f"/api/session/{quote_id(session_id)}/form/{quote_id(form_id)}",
+        )
+
     def reply_permission(self, session_id: str, request_id: str, decision: str, message: str | None = None):
         body = {"decision": decision}
         if message:
@@ -368,6 +516,7 @@ class Telegram:
                     "text": text[:4096],
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
+                    "reply_markup": {"inline_keyboard": []},
                 },
             )
         except TelegramError as exc:
@@ -423,6 +572,10 @@ class Bridge:
         self.perm_seen: set[str] = set()
         self.perm_by_token: dict[str, dict] = {}
         self.perm_by_message: dict[str, str] = {}
+        self.form_seen: set[str] = set()
+        self.form_closed: set[str] = set()
+        self.form_by_token: dict[str, dict] = {}
+        self.form_by_message: dict[str, str] = {}
         self.outbox: queue.Queue = queue.Queue()
 
     # -- lifecycle ---------------------------------------------------------
@@ -451,7 +604,7 @@ class Bridge:
                 item = self.outbox.get(timeout=1)
             except queue.Empty:
                 continue
-            text, session_id, keyboard, permission_token = item
+            text, session_id, keyboard, permission_token, form_token = item
             try:
                 result = self.tg.send(text, keyboard=keyboard)
                 message_id = result.get("message_id") if isinstance(result, dict) else None
@@ -464,6 +617,12 @@ class Bridge:
                             if entry is not None:
                                 entry["messageID"] = message_id
                             self.perm_by_message[str(message_id)] = permission_token
+                    if form_token:
+                        with self.pending_lock:
+                            entry = self.form_by_token.get(form_token)
+                            if entry is not None:
+                                entry["messageID"] = message_id
+                            self.form_by_message[str(message_id)] = form_token
             except TelegramError as exc:
                 log.warning("telegram send failed: %s", exc)
             except Exception as exc:  # noqa: BLE001 - keep the worker alive
@@ -574,6 +733,16 @@ class Bridge:
                 self.schedule_interrupted(session_id, data.get("reason"))
             return
 
+        if event_type == "form.created":
+            form = data.get("form") or data
+            if form and self.config["notify"].get("form", True):
+                self.schedule_form(form)
+            return
+
+        if event_type in ("form.replied", "form.cancelled"):
+            self.clear_form(data.get("id") or data.get("formID"))
+            return
+
         if event_type == "permission.asked":
             if self.config["notify"].get("permission", True):
                 self.schedule_permission(data)
@@ -605,21 +774,8 @@ class Bridge:
             log.debug("could not read recent messages for %s: %s", session_id, exc)
 
         title = session.get("title") or session_id
-        directory = (session.get("location") or {}).get("directory")
         failed = session.get("outcome") == "failed"
-
-        icon = "\u26a0\ufe0f" if failed else "\u2705"
-        heading = "Task failed" if failed else "Task finished"
-        lines = [f"{icon} <b>{heading}</b> \u2014 {esc(title)}"]
-        if directory:
-            lines.append(f"\U0001f4c1 <code>{esc(directory)}</code>")
-        if summary:
-            lines.append("")
-            lines.append(esc(shorten(summary, int(self.config.get("summaryChars", 600)))))
-        lines.append("")
-        lines.append("\u21a9\ufe0f <i>Reply to this message with your next prompt.</i>")
-
-        self.enqueue("\n".join(lines), session_id=session_id)
+        self.enqueue(finished_text(title, summary, failed), session_id=session_id)
 
     def schedule_error(self, session_id: str, error):
         threading.Thread(target=self.notify_error, args=(session_id, error), daemon=True).start()
@@ -693,11 +849,9 @@ class Bridge:
 
     def notify_permission(self, session_id: str, request_id: str, data: dict):
         title = session_id
-        directory = None
         try:
             session = self.oc.session(session_id)
             title = session.get("title") or session_id
-            directory = (session.get("location") or {}).get("directory")
         except ApiError:
             pass
 
@@ -706,18 +860,17 @@ class Bridge:
         if isinstance(resources, str):
             resources = [resources]
 
-        lines = [f"\U0001f510 <b>Permission requested</b> \u2014 {esc(title)}"]
-        if directory:
-            lines.append(f"\U0001f4c1 <code>{esc(directory)}</code>")
-        lines.append(f"Action: <b>{esc(str(action))}</b>")
-        for resource in resources[:3]:
-            lines.append(f"Resource: <code>{esc(shorten(str(resource), 200))}</code>")
-        if len(resources) > 3:
-            lines.append(f"\u2026 and {len(resources) - 3} more")
+        lines = [f"\U0001f510 <b>{esc(shorten(str(title), 100))}</b>"]
         message = data.get("message")
         if message:
-            lines.append("")
-            lines.append(esc(shorten(str(message), 400)))
+            lines.append(esc(compact_text(str(message), 2, 220)))
+        resource = resources[0] if resources else ""
+        detail = f"<b>{esc(shorten(str(action), 60))}</b>"
+        if resource:
+            detail += f": <code>{esc(shorten(str(resource), 140))}</code>"
+        if len(resources) > 1:
+            detail += f" (+{len(resources) - 1})"
+        lines.append(detail)
 
         token = secrets.token_hex(4)
         with self.pending_lock:
@@ -740,6 +893,309 @@ class Bridge:
         ]
         self.enqueue("\n".join(lines), session_id=None, keyboard=keyboard, permission_token=token)
 
+    # -- form questions ----------------------------------------------------
+
+    def schedule_form(self, form: dict):
+        form_id = str(form.get("id") or "")
+        session_id = str(form.get("sessionID") or "")
+        if not form_id or not session_id:
+            return
+        with self.pending_lock:
+            if form_id in self.form_seen:
+                return
+            self.form_seen.add(form_id)
+        threading.Thread(target=self.notify_form, args=(form,), daemon=True).start()
+
+    def notify_form(self, form: dict):
+        form_id = str(form.get("id") or "")
+        session_id = str(form.get("sessionID") or "")
+        try:
+            detail = self.oc.form(session_id, form_id)
+            if isinstance(detail, dict) and detail.get("fields"):
+                form = {**form, **detail}
+        except ApiError as exc:
+            if exc.status != 404:
+                log.debug("could not read form %s: %s", form_id, exc)
+
+        state = form.get("state") or {}
+        if isinstance(state, dict) and state.get("status") not in (None, "pending"):
+            return
+
+        with self.pending_lock:
+            if form_id in self.form_closed:
+                return
+
+        fields = [field for field in (form.get("fields") or []) if isinstance(field, dict)]
+        if not fields:
+            return
+
+        token = secrets.token_hex(4)
+        entry = {
+            "sessionID": session_id,
+            "formID": form_id,
+            "form": form,
+            "fields": fields,
+            "answers": {},
+            "index": 0,
+            "created": time.time(),
+        }
+        with self.pending_lock:
+            self.form_by_token[token] = entry
+
+        if not self.send_form_field(token, entry):
+            with self.pending_lock:
+                self.form_by_token.pop(token, None)
+
+    def send_form_field(self, token: str, entry: dict) -> bool:
+        fields = entry["fields"]
+        while entry["index"] < len(fields):
+            field = fields[entry["index"]]
+            if not self.form_field_visible(field, entry["answers"]):
+                entry["index"] += 1
+                continue
+            text, keyboard = self.form_question(token, field)
+            self.enqueue(text, keyboard=keyboard, form_token=token)
+            return True
+        return False
+
+    @staticmethod
+    def form_field_visible(field: dict, answers: dict) -> bool:
+        if field.get("hidden"):
+            return False
+        for condition in field.get("when") or []:
+            key = condition.get("key")
+            if key not in answers:
+                return False
+            actual = answers.get(key)
+            expected = condition.get("value")
+            if condition.get("op") == "eq" and actual != expected:
+                return False
+            if condition.get("op") == "neq" and actual == expected:
+                return False
+        return True
+
+    def form_question(self, token: str, field: dict):
+        title = field.get("title") or field.get("key") or "Question"
+        lines = [f"\u2753 <b>{esc(shorten(str(title), 80))}</b>"]
+        description = field.get("description") or ""
+        if description:
+            lines.append(esc(compact_text(str(description), 2, 220)))
+        lines.append("\u21a9\ufe0f Tap an option or reply to this message.")
+
+        keyboard = []
+        field_type = field.get("type")
+        options = field.get("options") or []
+        if field_type == "boolean":
+            keyboard.append(
+                [
+                    {"text": "Yes", "callback_data": f"form:{token}:bool:1"},
+                    {"text": "No", "callback_data": f"form:{token}:bool:0"},
+                ]
+            )
+        elif options and field_type in ("string", "multiselect"):
+            row = []
+            for index, option in enumerate(options[:8]):
+                label = option.get("label") or option.get("value") or str(index)
+                row.append(
+                    {
+                        "text": shorten(str(label), 40),
+                        "callback_data": f"form:{token}:opt:{index}",
+                    }
+                )
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        keyboard.append([{"text": "\u26d4 Cancel", "callback_data": f"form:{token}:cancel"}])
+        return "\n".join(lines), keyboard
+
+    def handle_form_callback(self, callback: dict, data: str):
+        callback_id = callback.get("id")
+        message = callback.get("message") or {}
+        message_id = message.get("message_id")
+        parts = data.split(":")
+        if len(parts) < 3:
+            if callback_id:
+                self.tg.answer_callback(callback_id, "Invalid action")
+            return
+
+        token = parts[1]
+        action = parts[2]
+        if action == "cancel":
+            self.cancel_form(token, message_id)
+            if callback_id:
+                self.tg.answer_callback(callback_id, "Cancelled")
+            return
+
+        with self.pending_lock:
+            entry = self.form_by_token.get(token)
+        if not entry or entry.get("index", 0) >= len(entry.get("fields") or []):
+            if callback_id:
+                self.tg.answer_callback(callback_id, "This question has expired")
+            if message_id:
+                self.tg.edit(message_id, "\u231b This question has expired.")
+            return
+
+        field = entry["fields"][entry["index"]]
+        if action == "bool" and len(parts) > 3:
+            value = parts[3] == "1"
+        elif action == "opt" and len(parts) > 3:
+            try:
+                option = (field.get("options") or [])[int(parts[3])]
+            except (ValueError, IndexError):
+                if callback_id:
+                    self.tg.answer_callback(callback_id, "Invalid option")
+                return
+            value = option.get("value") or option.get("label") or parts[3]
+            if field.get("type") == "multiselect":
+                value = [value]
+        else:
+            if callback_id:
+                self.tg.answer_callback(callback_id, "Invalid action")
+            return
+
+        self.record_form_answer(token, entry, message_id, value)
+        if callback_id:
+            self.tg.answer_callback(callback_id, "Answered")
+
+    def cancel_form(self, token: str, message_id=None):
+        with self.pending_lock:
+            entry = self.form_by_token.pop(token, None)
+            if entry:
+                self.form_closed.add(entry["formID"])
+        if not entry:
+            if message_id:
+                self.tg.edit(message_id, "\u231b This question has expired.")
+            return
+        try:
+            self.oc.cancel_form(entry["sessionID"], entry["formID"])
+        except ApiError as exc:
+            if exc.status not in (404, 409):
+                if message_id:
+                    self.tg.edit(message_id, f"\u26a0\ufe0f Could not cancel: HTTP {exc.status}")
+                return
+        if message_id:
+            self.tg.edit(message_id, "\u26d4 Question cancelled.")
+
+    def record_form_answer(self, token: str, entry: dict, message_id, value):
+        if entry.get("index", 0) >= len(entry.get("fields") or []):
+            return
+        field = entry["fields"][entry["index"]]
+        entry["answers"][field.get("key")] = value
+        entry["index"] += 1
+
+        if message_id:
+            label = field.get("title") or field.get("key") or "Question"
+            self.tg.edit(message_id, f"\u2705 {esc(shorten(str(label), 80))}")
+
+        if self.send_form_field(token, entry):
+            return
+
+        try:
+            self.oc.reply_form(entry["sessionID"], entry["formID"], entry["answers"])
+        except ApiError as exc:
+            if message_id:
+                self.tg.edit(message_id, f"\u26a0\ufe0f Could not send answer: HTTP {exc.status}")
+            with self.pending_lock:
+                self.form_by_token.pop(token, None)
+            return
+
+        with self.pending_lock:
+            self.form_by_token.pop(token, None)
+            self.form_closed.add(entry["formID"])
+        if message_id:
+            self.tg.edit(message_id, "\u2705 Answer sent.")
+
+    def handle_form_text(self, token: str, message_id, text: str):
+        with self.pending_lock:
+            entry = self.form_by_token.get(token)
+        if not entry or entry.get("index", 0) >= len(entry.get("fields") or []):
+            self.tg.send("\u231b This question has already been answered or expired.")
+            return
+
+        field = entry["fields"][entry["index"]]
+        value, error = self.parse_form_value(field, text)
+        if error:
+            self.tg.send(error)
+            return
+        self.record_form_answer(token, entry, message_id, value)
+
+    @staticmethod
+    def parse_form_value(field: dict, text: str):
+        raw = text.strip()
+        if not raw:
+            return None, "Answer cannot be empty."
+
+        field_type = field.get("type")
+        if field_type == "boolean":
+            normalized = raw.casefold()
+            if normalized in ("yes", "y", "true", "1", "ok"):
+                return True, None
+            if normalized in ("no", "n", "false", "0"):
+                return False, None
+            return None, "Reply with yes or no."
+
+        if field_type == "integer":
+            try:
+                return int(raw), None
+            except ValueError:
+                return None, "Reply with a whole number."
+
+        if field_type == "number":
+            try:
+                return float(raw), None
+            except ValueError:
+                return None, "Reply with a number."
+
+        options = field.get("options") or []
+
+        def match_option(item: str):
+            for option in options:
+                label = str(option.get("label") or "")
+                value = str(option.get("value") or "")
+                if item.casefold() in (label.casefold(), value.casefold()):
+                    return option.get("value") or option.get("label") or item
+            return None
+
+        if field_type == "multiselect":
+            answers = []
+            for item in (part.strip() for part in raw.split(",")):
+                if not item:
+                    continue
+                value = match_option(item)
+                if value is None:
+                    if not field.get("custom"):
+                        return None, "Choose from the options, separated by commas."
+                    value = item
+                answers.append(value)
+            if not answers:
+                return None, "Choose at least one option."
+            return answers, None
+
+        if field_type == "external":
+            return None, "This question must be answered in the OpenCode TUI."
+
+        if options:
+            value = match_option(raw)
+            if value is not None:
+                return value, None
+            if not field.get("custom"):
+                return None, "Choose one of the options."
+
+        return raw, None
+
+    def clear_form(self, form_id):
+        form_id = str(form_id or "")
+        if not form_id:
+            return
+        with self.pending_lock:
+            self.form_closed.add(form_id)
+            for token, entry in list(self.form_by_token.items()):
+                if entry.get("formID") == form_id:
+                    self.form_by_token.pop(token, None)
+
     @staticmethod
     def last_assistant_text(messages) -> str:
         if not isinstance(messages, list):
@@ -757,11 +1213,11 @@ class Bridge:
                     return part["text"].strip()
         return ""
 
-    def enqueue(self, text: str, session_id=None, keyboard=None, permission_token=None):
+    def enqueue(self, text: str, session_id=None, keyboard=None, permission_token=None, form_token=None):
         if self.tg.chat_id is None:
             log.info("no chat paired yet; dropping notification")
             return
-        self.outbox.put((text, session_id, keyboard, permission_token))
+        self.outbox.put((text, session_id, keyboard, permission_token, form_token))
 
     # -- Telegram ---------------------------------------------------------
 
@@ -851,6 +1307,10 @@ class Bridge:
         message_id = message.get("message_id")
 
         if self.tg.chat_id is None or (message.get("chat") or {}).get("id") != self.tg.chat_id:
+            return
+
+        if data.startswith("form:"):
+            self.handle_form_callback(callback, data)
             return
 
         if not data.startswith("perm:"):
@@ -1037,7 +1497,11 @@ class Bridge:
 
         if reply_to_id is not None:
             with self.pending_lock:
+                form_token = self.form_by_message.get(str(reply_to_id))
                 permission_token = self.perm_by_message.get(str(reply_to_id))
+            if form_token:
+                self.handle_form_text(form_token, reply_to_id, text)
+                return
             if permission_token:
                 self.handle_permission_text(permission_token, reply_to_id, text)
                 return

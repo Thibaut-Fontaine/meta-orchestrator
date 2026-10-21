@@ -34,11 +34,11 @@ what it means for `mox`.
 
 - The bridge is installed at `~/.config/opencode/telegram-bridge/`; a source
   snapshot is preserved in `contrib/opencode-telegram-bridge/`.
-- The systemd user unit is **enabled** but was **inactive** on 2026-10-21
-  (stopped at 02:23 CEST, before this note was written). Start it with
-  `systemctl --user start opencode-telegram-bridge.service`.
-- The Telegram token is configured and `getMe` succeeds; **no chat is paired
-  yet** (`bridge.py --check` reports “Not paired yet”).
+- The systemd user unit is **enabled and active**. Manage it with
+  `systemctl --user status opencode-telegram-bridge.service`.
+- The Telegram token is configured and `getMe` succeeds; the owner's private
+  chat is **paired**.
+- A real finished-notification round-trip was tested against Telegram.
 - The Android app has not been installed or tested on a device.
 - The temporary OpenCode sessions used for smoke tests were deleted.
 
@@ -145,6 +145,8 @@ No Python packages are required. `curl` is not used for Telegram; the bridge use
 | Recent text | `GET /api/session/{id}/message?type=assistant&order=desc&limit=N` — much lighter than `/context`. |
 | Send prompt | `POST /api/session/{id}/prompt` with `{"text": "...", "delivery": "queue"}`. |
 | Reply to permission | `POST /api/session/{id}/permission/{requestID}/reply` with `{"decision": "once" \| "always" \| "reject"}`. |
+| Reply to a question/form | `POST /api/session/{id}/form/{formID}/reply` with `{"answer": {fieldKey: value}}`. |
+| Cancel a question/form | `DELETE /api/session/{id}/form/{formID}`. |
 | Interrupt | `POST /api/session/{id}/interrupt`. |
 
 Two findings were important:
@@ -153,14 +155,18 @@ Two findings were important:
    temporary session saw `session.execution.succeeded` immediately at the end of
    the turn, but no `session.idle` within 45 seconds. The bridge therefore
    listens to:
-   - `session.execution.succeeded` → “task finished”;
-   - `session.execution.failed` → error;
-   - `session.execution.interrupted` → optional;
-   - `permission.asked` → permission request.
+   - `session.execution.succeeded` → short “task finished”;
+   - `permission.asked` → compact permission request;
+   - `form.created` → agent question, delivered as a short form prompt.
+   Error and interrupted events are disabled by default.
 
 2. **The permission reply field is `decision`, not `reply`.** The plugin API
    exposes `ctx.permission.reply({ reply: ... })`, but the HTTP endpoint expects
    `{"decision": "once"}`. Using the wrong field silently fails validation.
+
+   **Agent questions use the form API, not `question.asked`.** OpenCode 2.0.24
+   emits `form.created` with `data.form` (`id`, `sessionID`, `title`, `fields`).
+   The form reply body is `{"answer": {"fieldKey": value}}`.
 
 The `/context` endpoint returns the whole active context and can be large. For a
 notification summary, the paginated message endpoint is the right tool.
@@ -170,17 +176,19 @@ notification summary, the paginated message endpoint is the right tool.
 - **Pairing**: the first private chat that messages the bot is stored as
   `chatID` and persisted. Every other chat is ignored.
 - **Notifications**:
-  - finished: title, directory, last assistant text (truncated to
-    `summaryChars`);
-  - error: title, directory, error message;
-  - permission: action, up to three resources, optional message, with
-    **Allow once / Always / Reject** inline buttons.
-- **Replies**: a Telegram reply to a notification is routed to that
-  notification’s session. Plain messages go to the session selected with
-  `/use`.
+  - finished: session title plus at most three extracted point titles; no path,
+    paragraph, or footer; three sentences maximum;
+  - permission: title, short message, action, with **Allow once / Always /
+    Reject** inline buttons;
+  - question/form: field title, question in at most two sentences, option
+    buttons, and a Cancel button; multi-field forms are asked one field at a
+    time.
+- **Replies**: a Telegram reply to a finished notification is routed to that
+  session as the next prompt. A reply to a question answers the current form
+  field. Plain messages go to the session selected with `/use`.
 - **Commands**: `/start`, `/help`, `/sessions`, `/use N`, `/status`, `/stop`,
   `/id`.
-- **Feedback**: optional “Sent to <session>” confirmation.
+- **Feedback**: optional “Sent to <session>” confirmation, off by default.
 - **Deduplication**: event IDs are kept in a small LRU; idle/finished events are
   throttled per session; Telegram `update_id` is persisted so a restart does not
   replay old prompts.
@@ -194,11 +202,11 @@ notification summary, the paginated message endpoint is the right tool.
 - Reply path: a synthetic Telegram update was fed to the bridge; the prompt
   reached the intended session and the assistant replied correctly.
 - Permission callback mapping with a fake OpenCode client.
+- Real Telegram delivery: direct message plus a finished-session notification.
+- Form API: created a synthetic form, verified `GET`, `reply`, and state
+  transition with a live OpenCode 2.0.24 server.
+- Form callback and multi-field flow with a fake OpenCode client.
 - All temporary sessions used for testing were deleted.
-
-Not tested end-to-end against the real Telegram API before the token was
-provided. `getMe` succeeds with the configured token; pairing and a real
-notification round-trip are the remaining checks.
 
 ### 2.7 Limitations
 
@@ -211,10 +219,10 @@ notification round-trip are the remaining checks.
   has its own notifier for that (see §4).
 - **One bot, one bridge.** Running two bridges with the same token causes
   `409 Conflict` on `getUpdates`.
-- **Permission buttons expire on restart.** Pending permission tokens are kept in
-  memory. After a bridge restart, old buttons report “expired”; a text reply to
-  an old permission message can fall through as a normal prompt. The user can
-  still approve in the TUI.
+- **Permission and question buttons expire on restart.** Pending request tokens
+  are kept in memory. After a bridge restart, old buttons report “expired”; a
+  text reply to an old permission or question message can fall through as a
+  normal prompt. The user can still answer in the TUI.
 - **Message map is capped.** The last 500 notification message IDs are retained;
   older replies fall back to the last selected session.
 - **Notification latency is server-side and reliable**, but Telegram itself must

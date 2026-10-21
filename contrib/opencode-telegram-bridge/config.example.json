@@ -6,10 +6,11 @@
   "notify": {
     "finished": true,
     "permission": true,
-    "error": true,
+    "form": true,
+    "error": false,
     "interrupted": false
   },
   "includeSubagents": false,
-  "summaryChars": 600,
-  "replyConfirmation": true
+  "summaryChars": 280,
+  "replyConfirmation": false
 }

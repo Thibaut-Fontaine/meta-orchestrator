@@ -1,8 +1,9 @@
 # OpenCode → Telegram bridge
 
-Sends a Telegram notification when an OpenCode task finishes, needs permission,
-or fails. Replying to the notification (or to the bot) sends the text back to
-that session as the next prompt.
+Sends a short Telegram message only when an OpenCode task finishes or needs
+input (a permission or a question/form). Replying to a finished notification
+sends the text back to that session as the next prompt; replying to a question
+answers the pending form.
 
 This runs as a separate user service instead of an OpenCode plugin, so there is
 exactly one notifier no matter how many projects or OpenCode clients are open.
@@ -56,6 +57,7 @@ OpenCode shared service (:49374)
         ▲                                   editMessage / answerCallbackQuery
         │  POST /api/session/{id}/prompt
         │  POST /api/session/{id}/permission/{rid}/reply
+        │  POST /api/session/{id}/form/{fid}/reply
         │
    Telegram chat (phone)
 ```
@@ -76,6 +78,20 @@ Important implementation details:
 - **Event IDs and Telegram `update_id` are persisted** to avoid duplicate
   notifications and replayed prompts after a restart.
 
+## Message style
+
+The bridge is deliberately terse:
+
+- **Finished:** one line with the session title, then at most three main point
+  titles extracted from the final answer (Markdown headings or bullet titles).
+  No paths, paragraphs, or reply footer.
+- **Question/form:** the field title, the question in at most two sentences,
+  and inline option buttons. One field is asked at a time.
+- **Permission:** the session title, the request message, and the action.
+- **No error or interrupted messages by default.**
+
+The whole notification is capped at three sentences.
+
 ## Configuration
 
 Copy `config.example.json` to `~/.config/opencode/telegram-bridge/config.json`
@@ -90,12 +106,13 @@ and fill in the token, or let `setup.py` write it. The live file is mode `600`.
   "notify": {
     "finished": true,
     "permission": true,
-    "error": true,
+    "form": true,
+    "error": false,
     "interrupted": false
   },
   "includeSubagents": false,
-  "summaryChars": 600,
-  "replyConfirmation": true
+  "summaryChars": 280,
+  "replyConfirmation": false
 }
 ```
 
@@ -103,11 +120,15 @@ and fill in the token, or let `setup.py` write it. The live file is mode `600`.
   `opencode service status`, then `http://127.0.0.1:49374`.
 - `password` — optional. Normally read from
   `~/.config/opencode/service.json` or `OPENCODE_PASSWORD`.
-- `notify.*` — turn individual notification types off. `interrupted` is off by
-  default because a manual stop is usually intentional.
+- `notify.finished` / `notify.permission` / `notify.form` — the only message
+  types enabled by default.
+- `notify.error` / `notify.interrupted` — off by default; enable only if you
+  want noisy failure/stop notifications.
 - `includeSubagents` — also notify for child/subagent sessions (default off).
-- `summaryChars` — maximum characters of the final assistant message.
-- `replyConfirmation` — send “Sent to …” after forwarding a prompt.
+- `summaryChars` — retained for compatibility; the finished formatter also
+  applies the three-point/three-sentence cap.
+- `replyConfirmation` — send “Sent to …” after forwarding a prompt (default off
+  to avoid extra messages).
 
 ## Commands
 
@@ -120,8 +141,9 @@ and fill in the token, or let `setup.py` write it. The live file is mode `600`.
 | `/stop` | Interrupt the selected session. |
 | `/id` | Show the paired chat ID. |
 
-Plain messages go to the selected session. Replying to a notification always
-goes to the session that produced it.
+Plain messages go to the selected session. Replying to a finished notification
+goes to the session that produced it. Replying to a question answers the current
+form field; option buttons answer with one tap.
 
 ## Check and troubleshoot
 
@@ -147,9 +169,9 @@ changing the server URL.
   configured to that instance. In particular, `mox` agents run
   `opencode run --standalone` by default, so this bridge does not see them;
   `mox` has its own notifier.
-- Pending permission buttons are kept in memory. After a bridge restart, old
-  buttons report “expired”; a text reply to an old permission message can fall
-  through as a normal prompt. Approve in the TUI in that case.
+- Pending permission and question buttons are kept in memory. After a bridge
+  restart, old buttons report “expired”; a text reply to an old request can fall
+  through as a normal prompt. Answer in the TUI in that case.
 - The last 500 notification message IDs are retained; older replies fall back to
   the last selected session.
 - Running two bridges with the same bot token causes `409 Conflict` on
