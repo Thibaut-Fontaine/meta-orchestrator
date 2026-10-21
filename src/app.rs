@@ -1552,8 +1552,12 @@ impl App {
         // Local rolling pool.
         let needs: Vec<ComputeNeed> = local_specs.iter().map(|s| s.compute).collect();
         let mem_available = crate::host::mem_available_mb();
-        let effective =
-            scheduler.effective_parallel(&needs, mem_available, self.cfg.mem_per_agent_mb);
+        let effective = scheduler.parallel_for(
+            &needs,
+            mem_available,
+            self.cfg.mem_per_agent_mb,
+            opts.max_parallel.is_some(),
+        );
         let pool_scheduler = Scheduler::new(
             scheduler.total_cores(),
             scheduler.reserve_cores(),

@@ -13,6 +13,8 @@
 - Plan approval gate: `mox up` refuses an unapproved plan, shows the assessment
   and milestones, and asks `y/N`; `mox plan --approve` approves after review and
   `mox up --yes` bypasses for automation. Re-planning or adopting resets approval.
+- Explicit `--max-parallel N` now overrides the compute-aware concurrency cap,
+  so a heavy project no longer serializes every other selected project.
 - Every project gets `MANUAL.md` and a "Continue without mox" README section;
   `AGENTS.md` documents direct `MILESTONES.json` edits when mox is unavailable.
 

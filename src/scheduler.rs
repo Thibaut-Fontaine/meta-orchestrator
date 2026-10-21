@@ -88,6 +88,23 @@ impl Scheduler {
         self.max_parallel().min(by_cores.max(1)).min(by_mem).max(1)
     }
 
+    /// Concurrency for the local pool. An explicit `--max-parallel` wins over
+    /// the compute-aware cap; otherwise the heaviest expected workload and the
+    /// available memory decide.
+    pub fn parallel_for(
+        &self,
+        needs: &[crate::model::ComputeNeed],
+        mem_available_mb: u64,
+        mem_per_agent_mb: u64,
+        explicit_max_parallel: bool,
+    ) -> usize {
+        if explicit_max_parallel {
+            self.max_parallel()
+        } else {
+            self.effective_parallel(needs, mem_available_mb, mem_per_agent_mb)
+        }
+    }
+
     /// Indices of projects grouped into sequential waves of `max_parallel`.
     pub fn batches(&self, project_count: usize) -> Vec<Vec<usize>> {
         (0..project_count)
@@ -155,6 +172,14 @@ mod tests {
             s.effective_parallel(&[crate::model::ComputeNeed::Gpu], 100, 1024),
             1
         );
+    }
+
+    #[test]
+    fn explicit_max_parallel_overrides_the_heavy_cap() {
+        let s = Scheduler::new(8, 1, 2);
+        let heavy = [crate::model::ComputeNeed::Heavy];
+        assert_eq!(s.parallel_for(&heavy, 16_000, 768, false), 1);
+        assert_eq!(s.parallel_for(&heavy, 16_000, 768, true), 2);
     }
 
     #[test]

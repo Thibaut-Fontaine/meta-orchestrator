@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 329 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 330 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -675,7 +675,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 329 unit + 4 property + 8 end-to-end tests
+cargo test                 # 330 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```
