@@ -331,12 +331,18 @@ fn task_markdown(cfg: &Config, spec: &ProjectSpec) -> String {
     let mut out = format!(
         "# {title}\n\n**Slug:** `{slug}`  \n**Compute:** {compute}  \n\
          **Needs VPS:** {vps}  \n**Estimated disk:** {disk} MB  \n\
+         **Difficulty:** {difficulty}  \n**Estimated time:** {time}  \n\
+         **Estimated tokens:** ~{tokens} ({model})  \n\
          **Private repository:** yes  \n\n## Idea\n\n{idea}\n\n## Summary\n\n{summary}\n",
         title = spec.title,
         slug = spec.slug,
         compute = spec.compute.as_str(),
         vps = spec.needs_vps,
         disk = spec.estimated_disk_mb,
+        difficulty = spec.difficulty.as_str(),
+        time = crate::util::format_secs(crate::estimate::planned_secs(spec)),
+        tokens = crate::util::format_tokens(crate::estimate::planned_tokens(spec)),
+        model = crate::estimate::model_label(spec, cfg),
         idea = spec.idea,
         summary = if spec.summary.is_empty() {
             "(none)"
@@ -488,6 +494,9 @@ mod tests {
         let task = std::fs::read_to_string(project.join("TASK.md")).unwrap();
         assert!(task.contains("PostgreSQL"));
         assert!(task.contains("Private repository"));
+        assert!(task.contains("**Difficulty:** medium"));
+        assert!(task.contains("**Estimated time:** 1h50m"));
+        assert!(task.contains("**Estimated tokens:** ~220k (deepseek-v4.1-flash)"));
         assert!(task.contains("## Milestones"));
         assert!(task.contains("m1"));
         assert!(task.contains("mox milestone"));

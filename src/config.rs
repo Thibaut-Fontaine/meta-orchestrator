@@ -70,6 +70,9 @@ pub struct Config {
     pub run_timeout_secs: u64,
     /// Optional `provider/model` passed to opencode.
     pub model: String,
+    /// Model label used only for project token estimates. It does not change
+    /// the model that executes the project.
+    pub estimate_model: String,
     /// Auto-approve OpenCode permissions (unattended runs need this).
     pub auto_approve: bool,
     /// Run each agent with its own private server instead of the shared one.
@@ -124,6 +127,7 @@ impl Default for Config {
             brain_timeout_secs: 900,
             run_timeout_secs: 7200,
             model: String::new(),
+            estimate_model: "deepseek-v4.1-flash".to_string(),
             auto_approve: true,
             // A private server per agent inherits PATH/TMPDIR/CARGO_TARGET_DIR,
             // which is what makes guardrails and cache isolation effective.
@@ -250,6 +254,9 @@ impl Config {
         }
         if let Some(v) = var("MOX_MODEL") {
             self.model = v;
+        }
+        if let Some(v) = var("MOX_ESTIMATE_MODEL") {
+            self.estimate_model = v;
         }
         if let Some(v) = var("MOX_AUTO_APPROVE") {
             self.auto_approve = matches!(v.as_str(), "1" | "true" | "yes" | "on");
@@ -399,6 +406,8 @@ run_timeout_secs = {run_timeout_secs}
 
 # Optional provider/model for opencode, e.g. "anthropic/claude-sonnet-4".
 model = {model:?}
+# Model label used only for planning token estimates.
+estimate_model = {estimate_model:?}
 auto_approve = {auto_approve}
 standalone = {standalone}
 extra_instructions = {extra_instructions:?}
@@ -442,6 +451,7 @@ webhook_url = {webhook_url:?}
             brain_timeout_secs = self.brain_timeout_secs,
             run_timeout_secs = self.run_timeout_secs,
             model = self.model,
+            estimate_model = self.estimate_model,
             auto_approve = self.auto_approve,
             standalone = self.standalone,
             extra_instructions = self.extra_instructions,
@@ -518,6 +528,7 @@ mod tests {
         assert!(cfg.auto_approve);
         assert!(cfg.standalone);
         assert_eq!(cfg.ssh_alias, "vps-ovh");
+        assert_eq!(cfg.estimate_model, "deepseek-v4.1-flash");
     }
 
     #[test]

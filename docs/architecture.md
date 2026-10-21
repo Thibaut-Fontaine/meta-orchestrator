@@ -10,7 +10,7 @@ never builds or runs project code and never benchmarks the CPU.
 |---|---|---|
 | CLI | `cli`, `main`, `app` | argument parsing and command orchestration |
 | Process | `exec` | the only place that spawns processes; timeouts, pid files, logging; `FakeRunner` for tests |
-| Planning | `ideas`, `brain`, `prompts` | idea parsing, questions, answers, specs, milestones |
+| Planning | `ideas`, `brain`, `prompts`, `estimate` | idea parsing, questions, answers, specs, difficulty/time/token budget, milestones |
 | Scheduling | `scheduler`, `runner` | core partitions, RAM/compute admission, rolling pool, isolation env |
 | Workspaces | `scaffold`, `github`, `hooks` | non-overwriting files, private repos, pre-commit guard |
 | Progress | `milestones`, `stats`, `verify` | boards, weighted ETA, cross-project priors, push verification |

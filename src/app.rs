@@ -22,7 +22,9 @@ use crate::scaffold::scaffold_project;
 use crate::scheduler::Scheduler;
 use crate::state::{self, State};
 use crate::stats;
-use crate::util::{display_path, human_mb, now_rfc3339, tail_lines, truncate_chars};
+use crate::util::{
+    display_path, format_secs, format_tokens, human_mb, now_rfc3339, tail_lines, truncate_chars,
+};
 use crate::vps::{self, HostCapacity};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -663,6 +665,12 @@ impl App {
             self.collect_answers(&mut specs, out)?;
         }
 
+        for spec in &mut specs {
+            if spec.token_estimate_model.trim().is_empty() {
+                spec.token_estimate_model = self.cfg.estimate_model.clone();
+            }
+        }
+
         if opts.deep && !self.dry_run {
             writeln!(out, "refining the specification from the answers...")?;
             let prompt = prompts::refinement_prompt(&specs);
@@ -693,8 +701,28 @@ impl App {
                 if !project.assumptions.is_empty() {
                     spec.assumptions = project.assumptions;
                 }
+                if let Some(difficulty) = project
+                    .difficulty
+                    .as_deref()
+                    .and_then(|d| d.parse::<crate::model::Complexity>().ok())
+                {
+                    spec.difficulty = difficulty;
+                }
+                if let Some(tokens) = project.estimated_tokens.filter(|tokens| *tokens > 0) {
+                    spec.estimated_tokens = crate::estimate::clamp_tokens(tokens);
+                }
             }
             writeln!(out, "spec refined for {} project(s)", specs.len())?;
+        }
+
+        for spec in &mut specs {
+            if spec.token_estimate_model.trim().is_empty() {
+                spec.token_estimate_model = self.cfg.estimate_model.clone();
+            }
+            if spec.estimated_tokens == 0 {
+                spec.estimated_tokens =
+                    crate::estimate::tokens_from_secs(crate::estimate::planned_secs(spec));
+            }
         }
 
         let plan = Plan {
@@ -749,19 +777,28 @@ impl App {
         if let Some(host) = &plan.host {
             writeln!(out, "estimates for: {}", host.describe())?;
         }
+        if !self.cfg.estimate_model.trim().is_empty() {
+            writeln!(
+                out,
+                "token estimates for: {}",
+                self.cfg.estimate_model.trim()
+            )?;
+        }
         writeln!(out, "plan for {} project(s):", plan.specs.len())?;
         writeln!(
             out,
-            "  {:<28} {:<10} {:<8} title",
-            "slug", "compute", "questions"
+            "  {:<28} {:<12} {:<8} {:<8} {:<8} title",
+            "slug", "difficulty", "time", "tokens", "questions"
         )?;
         for spec in &plan.specs {
             let unanswered = spec.unanswered().len();
             writeln!(
                 out,
-                "  {:<28} {:<10} {:<8} {}",
+                "  {:<28} {:<12} {:<8} {:<8} {:<8} {}",
                 spec.slug,
-                spec.compute.as_str(),
+                spec.difficulty.as_str(),
+                format_secs(crate::estimate::planned_secs(spec)),
+                format!("~{}", format_tokens(crate::estimate::planned_tokens(spec))),
                 format!(
                     "{}/{}",
                     spec.questions.len() - unanswered,
@@ -1042,6 +1079,11 @@ impl App {
                     out,
                     "  would scaffold README.md, AGENTS.md, TASK.md, .gitignore"
                 )?;
+                writeln!(
+                    out,
+                    "  estimate: {}",
+                    crate::estimate::describe(spec, &self.cfg)
+                )?;
             } else {
                 match scaffold_project(&self.cfg, spec) {
                     Ok(result) => {
@@ -1055,6 +1097,11 @@ impl App {
                             } else {
                                 ""
                             }
+                        )?;
+                        writeln!(
+                            out,
+                            "  estimate: {}",
+                            crate::estimate::describe(spec, &self.cfg)
                         )?;
                         if !result.created.is_empty() {
                             writeln!(
@@ -1907,6 +1954,10 @@ impl App {
         };
         let mut spec = crate::model::ProjectSpec::from_idea(&idea, slug.clone());
         spec.milestones = crate::milestones::fallback_for(&spec);
+        spec.difficulty = crate::estimate::difficulty_from_milestones(&spec.milestones);
+        spec.estimated_tokens =
+            crate::estimate::tokens_from_secs(crate::estimate::planned_secs(&spec));
+        spec.token_estimate_model = self.cfg.estimate_model.clone();
         if plan.get(&slug).is_none() {
             plan.specs.push(spec.clone());
             plan.created_at = now_rfc3339();
@@ -1925,6 +1976,11 @@ impl App {
             "adopted {slug} -> {} ({} new file(s))",
             display_path(&scaffolding.path),
             scaffolding.created.len()
+        )?;
+        writeln!(
+            out,
+            "  estimate: {}",
+            crate::estimate::describe(&spec, &self.cfg)
         )?;
         Ok(())
     }
@@ -3489,9 +3545,14 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("expense"));
         assert!(text.contains("estimates for:"), "{text}");
+        assert!(text.contains("difficulty"), "{text}");
+        assert!(text.contains("~220k"), "{text}");
         let saved = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
         assert_eq!(saved.specs.len(), 1);
         assert_eq!(saved.specs[0].compute, ComputeNeed::Medium);
+        assert_eq!(saved.specs[0].difficulty, crate::model::Complexity::High);
+        assert_eq!(saved.specs[0].estimated_tokens, 220_000);
+        assert_eq!(saved.specs[0].token_estimate_model, app.cfg.estimate_model);
         let host = saved.host.as_ref().expect("host profile saved");
         assert!(host.cores >= 1);
         assert!(!host.cpu_model.is_empty());
@@ -3512,6 +3573,7 @@ mod tests {
                 "questions":[{"id":"q1","question":"Which DB?","default":"SQLite"}]}]}"#
                 .to_string(),
             r#"{"projects":[{"slug":"expense","summary":"refined summary",
+                "difficulty":"high","estimated_tokens":777000,
                 "acceptance_criteria":["works end to end"],"risks":["scope"],
                 "assumptions":["single user"]}]}"#
                 .to_string(),
@@ -3534,6 +3596,8 @@ mod tests {
         assert_eq!(saved.specs[0].summary, "refined summary");
         assert_eq!(saved.specs[0].acceptance_criteria, vec!["works end to end"]);
         assert_eq!(saved.specs[0].risks, vec!["scope"]);
+        assert_eq!(saved.specs[0].difficulty, crate::model::Complexity::High);
+        assert_eq!(saved.specs[0].estimated_tokens, 777_000);
         assert_eq!(brain.prompts().len(), 2);
     }
 
@@ -4737,8 +4801,14 @@ mod tests {
         assert!(path.join("MILESTONES.json").exists());
         assert!(path.join("TASKS.md").exists());
         let plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
-        assert!(plan.get("legacy").is_some());
-        assert!(String::from_utf8(out).unwrap().contains("adopted legacy"));
+        let spec = plan.get("legacy").expect("adopted spec");
+        assert_eq!(spec.difficulty, crate::model::Complexity::High);
+        assert_eq!(spec.estimated_tokens, 220_000);
+        assert_eq!(spec.token_estimate_model, app.cfg.estimate_model);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("adopted legacy"));
+        assert!(out.contains("estimate: high"));
+        assert!(out.contains("~220k"));
     }
 
     #[test]

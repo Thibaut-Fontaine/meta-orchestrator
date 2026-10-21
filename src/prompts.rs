@@ -63,6 +63,8 @@ pub fn questions_prompt(
                \"compute\": \"light|medium|heavy|gpu\",\n\
                \"needs_vps\": false,\n\
                \"estimated_disk_mb\": 500,\n\
+               \"difficulty\": \"low|medium|high|very-high\",\n\
+               \"estimated_tokens\": 250000,\n\
                \"acceptance_criteria\": [\"...\"],\n\
                \"milestones\": [\n\
                  {\"id\": \"m1\", \"title\": \"Foundation and failing tests\",\n\
@@ -75,6 +77,13 @@ pub fn questions_prompt(
              }\n\
            ]\n\
          }\n\n\
+         Start with a project-level assessment BEFORE the questions and \
+         milestones: rate the whole project's `difficulty` and estimate the \
+         total `estimated_tokens` the implementation will consume with the \
+         current implementation model (`ESTIMATE_MODEL`). Count all agent \
+         work: planning, code, tests, debugging and review. `estimated_tokens` \
+         is the total input+output budget for the whole project, not a \
+         per-milestone or per-call figure.\n\n\
          `compute` means the agent's build/run intensity. Use `heavy` for \
          compilers, data processing or long test suites, and `gpu` only when the \
          project truly needs a GPU. `needs_vps` is true only when the project must \
@@ -89,6 +98,12 @@ pub fn questions_prompt(
          empty string. Estimates drive the ETA shown by `mox status`, so be \
          honest about size.\n\n",
     );
+    let estimate_model = if cfg.estimate_model.trim().is_empty() {
+        "current OpenCode model"
+    } else {
+        cfg.estimate_model.trim()
+    };
+    out = out.replace("ESTIMATE_MODEL", estimate_model);
     out.push_str("## Target machine\n");
     out.push_str(&host.planning_guidance());
     out.push_str("\n\n");
@@ -252,16 +267,27 @@ pub fn refinement_prompt(specs: &[ProjectSpec]) -> String {
         "You are refining project specifications after the owner answered clarifying questions.\n\
          For each project, rewrite the summary, acceptance criteria, assumptions and risks so they\n\
          match the answers. Keep them concrete and testable. Do not invent requirements.\n\
+         Reassess the overall difficulty and total token budget if the answers\
+         materially change scope.\n\
          Return ONE JSON object: {\"projects\":[{\"slug\":\"...\",\"summary\":\"...\",\n\
+         \"difficulty\":\"low|medium|high|very-high\",\"estimated_tokens\":250000,\n\
          \"acceptance_criteria\":[\"...\"],\"assumptions\":[\"...\"],\"risks\":[\"...\"]}]}\n\n",
     );
     for spec in specs {
         out.push_str(&format!(
-            "## {} (`{}`)\nIdea: {}\nSummary so far: {}\nAnswers:\n{}\n\n",
+            "## {} (`{}`)\nIdea: {}\nSummary so far: {}\n\
+             Current assessment: difficulty={}, estimated_tokens={}, model={}\nAnswers:\n{}\n\n",
             spec.title,
             spec.slug,
             spec.idea,
             spec.summary,
+            spec.difficulty.as_str(),
+            spec.estimated_tokens,
+            if spec.token_estimate_model.is_empty() {
+                "current model"
+            } else {
+                &spec.token_estimate_model
+            },
             spec.answer_lines()
                 .into_iter()
                 .map(|line| format!("- {line}"))
@@ -326,6 +352,8 @@ pub struct BrainProject {
     pub compute: Option<String>,
     pub needs_vps: Option<bool>,
     pub estimated_disk_mb: Option<u64>,
+    pub difficulty: Option<String>,
+    pub estimated_tokens: Option<u64>,
     pub acceptance_criteria: Vec<String>,
     pub milestones: Vec<BrainMilestone>,
 }
@@ -389,6 +417,7 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
 
         let mut spec = ProjectSpec::from_idea(idea, hint.clone());
         let mut brain_milestones = Vec::new();
+        let mut explicit_difficulty = false;
         if let Some(brain) = brain {
             if let Some(slug) = brain.slug.as_deref() {
                 let clean = slugify(slug);
@@ -417,6 +446,17 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
                 ComputeNeed::Heavy | ComputeNeed::Gpu
             ));
             spec.estimated_disk_mb = brain.estimated_disk_mb.unwrap_or(512).clamp(64, 200_000);
+            if let Some(difficulty) = brain
+                .difficulty
+                .as_deref()
+                .and_then(|d| d.parse::<Complexity>().ok())
+            {
+                spec.difficulty = difficulty;
+                explicit_difficulty = true;
+            }
+            if let Some(tokens) = brain.estimated_tokens.filter(|tokens| *tokens > 0) {
+                spec.estimated_tokens = crate::estimate::clamp_tokens(tokens);
+            }
             brain_milestones = brain.milestones;
         }
         if spec.summary.is_empty() {
@@ -426,6 +466,13 @@ pub fn merge_specs(ideas: &[Idea], mut assessed: Vec<BrainProject>) -> Vec<Proje
             spec.acceptance_criteria = default_acceptance();
         }
         spec.milestones = normalise_milestones(brain_milestones, &spec);
+        if !explicit_difficulty {
+            spec.difficulty = crate::estimate::difficulty_from_milestones(&spec.milestones);
+        }
+        if spec.estimated_tokens == 0 {
+            spec.estimated_tokens =
+                crate::estimate::tokens_from_secs(crate::estimate::planned_secs(&spec));
+        }
         spec.slug = unique_slug(&spec.slug, &used_slugs);
         used_slugs.push(spec.slug.clone());
         specs.push(spec);
@@ -657,6 +704,9 @@ mod tests {
         assert!(prompt.contains("\"milestones\""));
         assert!(prompt.contains("\"estimate_minutes\""));
         assert!(prompt.contains("\"algorithmic_complexity\""));
+        assert!(prompt.contains("\"difficulty\""));
+        assert!(prompt.contains("\"estimated_tokens\""));
+        assert!(prompt.contains("deepseek-v4.1-flash"));
         assert!(prompt.contains("Test CPU"));
         assert!(prompt.contains("input scale"));
     }
@@ -705,6 +755,8 @@ mod tests {
         let prompt = refinement_prompt(&[spec]);
         assert!(prompt.contains("SQLite"));
         assert!(prompt.contains("acceptance_criteria"));
+        assert!(prompt.contains("\"difficulty\""));
+        assert!(prompt.contains("\"estimated_tokens\""));
     }
 
     #[test]
@@ -813,6 +865,36 @@ mod tests {
 
     fn ideas_v2() -> Vec<Idea> {
         vec![idea("Y", "y")]
+    }
+
+    #[test]
+    fn merge_carries_the_project_assessment() {
+        let ideas = vec![idea("X", "x")];
+        let assessed = parse_brain_response(
+            r#"{"projects": [{
+                "slug": "x",
+                "difficulty": "very-high",
+                "estimated_tokens": 345000,
+                "milestones": [
+                    {"title": "Core", "complexity": "high", "estimate_minutes": 60}
+                ]
+            }]}"#,
+        )
+        .unwrap();
+        let spec = &merge_specs(&ideas, assessed)[0];
+        assert_eq!(spec.difficulty, Complexity::VeryHigh);
+        assert_eq!(spec.estimated_tokens, 345_000);
+
+        let assessed = parse_brain_response(
+            r#"{"projects": [{
+                "slug": "x",
+                "milestones": [{"title": "Core", "complexity": "low", "estimate_minutes": 20}]
+            }]}"#,
+        )
+        .unwrap();
+        let spec = &merge_specs(&ideas, assessed)[0];
+        assert_eq!(spec.difficulty, Complexity::Low);
+        assert_eq!(spec.estimated_tokens, 40_000);
     }
 
     #[test]

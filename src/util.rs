@@ -175,6 +175,20 @@ pub fn format_secs(seconds: u64) -> String {
     }
 }
 
+/// Compact token count: `950`, `2k`, `220k`, `1.2M`.
+pub fn format_tokens(tokens: u64) -> String {
+    let value = tokens as f64;
+    if tokens >= 1_000_000 {
+        let text = format!("{:.1}", value / 1_000_000.0);
+        return format!("{}M", text.strip_suffix(".0").unwrap_or(&text));
+    }
+    if tokens >= 1_000 {
+        let text = format!("{:.1}", value / 1_000.0);
+        return format!("{}k", text.strip_suffix(".0").unwrap_or(&text));
+    }
+    tokens.to_string()
+}
+
 /// Standard base64 (with padding). Used to pass long prompts through `ssh`
 /// without shell-quoting hazards.
 pub fn base64_encode(input: &[u8]) -> String {
@@ -475,6 +489,15 @@ Thanks."#;
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(1024), "1.0 KiB");
         assert_eq!(human_mb(2048), "2.0 GiB");
+    }
+
+    #[test]
+    fn compact_token_counts() {
+        assert_eq!(format_tokens(950), "950");
+        assert_eq!(format_tokens(2_000), "2k");
+        assert_eq!(format_tokens(12_500), "12.5k");
+        assert_eq!(format_tokens(220_000), "220k");
+        assert_eq!(format_tokens(1_250_000), "1.2M");
     }
 
     #[test]

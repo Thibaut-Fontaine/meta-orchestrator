@@ -98,7 +98,7 @@ impl std::str::FromStr for Complexity {
 }
 
 /// One milestone in the plan (no runtime state; see `milestones::Milestone`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MilestoneSpec {
     #[serde(default)]
     pub id: String,
@@ -172,6 +172,15 @@ pub struct ProjectSpec {
     pub needs_vps: bool,
     #[serde(default)]
     pub estimated_disk_mb: u64,
+    /// Overall implementation difficulty, assessed before the build starts.
+    #[serde(default)]
+    pub difficulty: Complexity,
+    /// Total token budget for the whole project (input + output).
+    #[serde(default)]
+    pub estimated_tokens: u64,
+    /// Model label the token estimate was made for.
+    #[serde(default)]
+    pub token_estimate_model: String,
     #[serde(default)]
     pub milestones: Vec<MilestoneSpec>,
 }
@@ -198,6 +207,9 @@ impl ProjectSpec {
             compute: ComputeNeed::Light,
             needs_vps: false,
             estimated_disk_mb: 512,
+            difficulty: Complexity::Medium,
+            estimated_tokens: 0,
+            token_estimate_model: String::new(),
             milestones: Vec::new(),
         }
     }
@@ -433,6 +445,9 @@ mod tests {
         assert_eq!(spec.title, "Budget Buddy");
         assert_eq!(spec.slug, "budget-buddy");
         assert_eq!(spec.estimated_disk_mb, 512);
+        assert_eq!(spec.difficulty, Complexity::Medium);
+        assert_eq!(spec.estimated_tokens, 0);
+        assert!(spec.token_estimate_model.is_empty());
         assert!(spec.milestones.is_empty());
     }
 

@@ -17,6 +17,7 @@ pub mod checks;
 pub mod clean;
 pub mod cli;
 pub mod config;
+pub mod estimate;
 pub mod events;
 pub mod exec;
 pub mod github;

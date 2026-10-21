@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+- Project-level assessment before implementation: difficulty, planned time and a
+  total token budget for the current estimate model (`deepseek-v4.1-flash` by
+  default).
+- `mox plan` shows difficulty/time/tokens; `mox up` and `TASK.md` repeat them.
+- Token estimates come from the planning brain, with a deterministic fallback of
+  2,000 tokens per planned minute (clamped to 2k–50M).
+- `estimate_model` / `MOX_ESTIMATE_MODEL`; adopted projects get a fallback
+  assessment from their milestones.
+
 ## 0.9.0
 
 - Disaster recovery: per-project and global `RECOVERY.md` on the VPS, written by

@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 318 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 325 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -23,7 +23,11 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
 
 1. **`mox plan`** reads your ideas, asks an OpenCode "brain" to think critically
    about each one, and produces 3–6 clarifying questions per project plus a
-   summary, assumptions, risks, stack, compute class and disk estimate.
+   summary, assumptions, risks, stack, compute class and disk estimate. Before
+   the questions, it also assesses **difficulty**, planned **time** and a total
+   **token budget** for the whole project. The token estimate targets
+   `estimate_model` (default `deepseek-v4.1-flash`) and is shown in `mox plan`,
+   `mox up` and each project's `TASK.md`.
 2. **You answer** — interactively, or by editing `answers.toml` and re-running
    `mox plan --answers`.
 3. **`mox up`** scaffolds one git repository per project, commits it, creates a
@@ -288,6 +292,23 @@ measured calibration. There is no synthetic CPU benchmark: different workloads
 (compilation, network, data volume) do not correlate with one score, and real
 milestone timings are the better signal.
 
+### Project assessment
+
+Every new project is assessed before implementation starts:
+
+- **difficulty** — `low`, `medium`, `high` or `very-high`;
+- **time** — the sum of the planned milestone estimates, shown as `1h50m`;
+- **tokens** — the total input+output budget for the whole project, not per
+  milestone or per model call.
+
+`mox plan` prints these columns, `mox up` prints the same line before launching,
+and `TASK.md` starts with them. The token estimate is made for
+`estimate_model` (default `deepseek-v4.1-flash`; override with
+`MOX_ESTIMATE_MODEL` or the config key). If the planning model omits a token
+count, `mox` falls back to **2,000 tokens per planned minute**, clamped to
+2k–50M. The number is a planning budget, not a hard cap: mox does not enforce a
+token ceiling because OpenCode does not expose one reliably.
+
 ### Cross-project calibration
 
 Every completed milestone is appended to `~/.local/state/meta-orchestrator/stats.json`
@@ -545,6 +566,7 @@ project_disk_budget_mb = 4096
 brain_timeout_secs = 900
 run_timeout_secs = 7200   # wall-clock cap per agent run
 model = ""            # e.g. "anthropic/claude-sonnet-4"
+estimate_model = "deepseek-v4.1-flash"  # label used only for token estimates
 auto_approve = true   # required for unattended runs
 standalone = true     # private server per agent: env/PATH guardrails apply (more RAM)
 extra_instructions = ""
@@ -593,7 +615,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 318 unit + 4 property + 8 end-to-end tests
+cargo test                 # 325 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```
