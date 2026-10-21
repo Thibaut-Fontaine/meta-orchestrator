@@ -77,6 +77,9 @@ Important implementation details:
   go to the session selected with `/use`.
 - **Event IDs and Telegram `update_id` are persisted** to avoid duplicate
   notifications and replayed prompts after a restart.
+- **Pending form and permission routes are persisted** in `state.json`, so a
+  bridge restart does not invalidate buttons already sent. On startup, and on
+  `/pending`, the bridge scans recent sessions for questions it missed.
 
 ## Message style
 
@@ -169,9 +172,10 @@ changing the server URL.
   configured to that instance. In particular, `mox` agents run
   `opencode run --standalone` by default, so this bridge does not see them;
   `mox` has its own notifier.
-- Pending permission and question buttons are kept in memory. After a bridge
-  restart, old buttons report “expired”; a text reply to an old request can fall
-  through as a normal prompt. Answer in the TUI in that case.
+- Pending permission and question routes are persisted in `state.json`; after a
+  restart, old buttons keep working. If a route is genuinely gone, the bridge
+  reports “expired” instead of forwarding the reply as a normal prompt, and
+  `/pending` re-checks recent sessions.
 - The last 500 notification message IDs are retained; older replies fall back to
   the last selected session.
 - Running two bridges with the same bot token causes `409 Conflict` on

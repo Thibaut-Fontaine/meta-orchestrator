@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import html
 import json
 import logging
@@ -30,7 +31,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 BRIDGE_DIR = CONFIG_HOME / "opencode" / "telegram-bridge"
@@ -557,6 +558,7 @@ Plain messages go to the session selected with /use.
 /sessions \u2014 recent sessions
 /use N \u2014 select the session for plain messages
 /status \u2014 selected session and running work
+/pending \u2014 re-check and re-send pending questions
 /stop \u2014 interrupt the selected session
 /id \u2014 show this chat ID
 /help \u2014 this message"""
@@ -582,6 +584,7 @@ class Bridge:
         self.form_by_token: dict[str, dict] = {}
         self.form_by_message: dict[str, str] = {}
         self.outbox: queue.Queue = queue.Queue()
+        self.load_pending_state()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -596,6 +599,7 @@ class Bridge:
         threading.Thread(target=self.sender_loop, name="sender", daemon=True).start()
         threading.Thread(target=self.telegram_loop, name="telegram", daemon=True).start()
         threading.Thread(target=self.event_loop, name="events", daemon=True).start()
+        threading.Thread(target=self.recover_safely, name="recover", daemon=True).start()
 
         while not self.stop.is_set():
             self.stop.wait(1)
@@ -628,6 +632,8 @@ class Bridge:
                             if entry is not None:
                                 entry["messageID"] = message_id
                             self.form_by_message[str(message_id)] = form_token
+                    if permission_token or form_token:
+                        self.persist_pending()
             except TelegramError as exc:
                 log.warning("telegram send failed: %s", exc)
             except Exception as exc:  # noqa: BLE001 - keep the worker alive
@@ -637,7 +643,7 @@ class Bridge:
 
     def save_state(self):
         with self.state_lock:
-            state = dict(self.state)
+            state = copy.deepcopy(self.state)
             messages = dict(state.get("messages") or {})
             if len(messages) > 500:
                 for key in list(messages)[: len(messages) - 500]:
@@ -645,6 +651,140 @@ class Bridge:
             state["messages"] = messages
             state["seenUpdates"] = list(state.get("seenUpdates") or [])[-200:]
             save_json(STATE_PATH, state)
+
+    def load_pending_state(self):
+        """Restore pending form/permission routes so old Telegram buttons still work."""
+        with self.state_lock:
+            forms = self.state.get("forms") or {}
+            form_messages = self.state.get("formMessages") or {}
+            permissions = self.state.get("permissions") or {}
+            permission_messages = self.state.get("permissionMessages") or {}
+        if isinstance(forms, dict):
+            self.form_by_token = {
+                str(token): entry for token, entry in forms.items() if isinstance(entry, dict)
+            }
+        if isinstance(form_messages, dict):
+            self.form_by_message = {str(key): str(value) for key, value in form_messages.items()}
+        if isinstance(permissions, dict):
+            self.perm_by_token = {
+                str(token): entry
+                for token, entry in permissions.items()
+                if isinstance(entry, dict)
+            }
+        if isinstance(permission_messages, dict):
+            self.perm_by_message = {
+                str(key): str(value) for key, value in permission_messages.items()
+            }
+        self.form_seen = {
+            str(entry.get("formID"))
+            for entry in self.form_by_token.values()
+            if entry.get("formID")
+        }
+        self.perm_seen = {
+            str(entry.get("requestID"))
+            for entry in self.perm_by_token.values()
+            if entry.get("requestID")
+        }
+
+    def persist_pending(self):
+        with self.pending_lock:
+            state = {
+                "forms": copy.deepcopy(self.form_by_token),
+                "formMessages": dict(self.form_by_message),
+                "permissions": copy.deepcopy(self.perm_by_token),
+                "permissionMessages": dict(self.perm_by_message),
+            }
+        with self.state_lock:
+            self.state.update(state)
+        self.save_state()
+
+    def recover_safely(self):
+        self.stop.wait(2)
+        if self.stop.is_set():
+            return
+        try:
+            self.recover_pending()
+        except Exception as exc:  # noqa: BLE001 - recovery is best effort
+            log.warning("pending recovery failed: %s", exc)
+
+    def recover_pending(self):
+        """Find forms/permissions created while the bridge was down."""
+        sessions = self.oc.request("GET", "/api/session?limit=40") or []
+        if not isinstance(sessions, list):
+            return
+        recovered = 0
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            session_id = str(session.get("id") or "")
+            if not session_id:
+                continue
+            if is_internal_session_title(str(session.get("title") or "")):
+                continue
+            try:
+                forms = self.oc.request(
+                    "GET", f"/api/session/{quote_id(session_id)}/form"
+                ) or []
+            except ApiError as exc:
+                log.debug("could not list forms for %s: %s", session_id, exc)
+                forms = []
+            if isinstance(forms, list):
+                for form in forms:
+                    if not isinstance(form, dict) or not form.get("id"):
+                        continue
+                    before = len(self.form_seen)
+                    self.schedule_form({**form, "sessionID": form.get("sessionID") or session_id})
+                    if len(self.form_seen) > before:
+                        recovered += 1
+            try:
+                permissions = self.oc.request(
+                    "GET", f"/api/session/{quote_id(session_id)}/permission"
+                ) or []
+            except ApiError as exc:
+                log.debug("could not list permissions for %s: %s", session_id, exc)
+                permissions = []
+            if isinstance(permissions, list):
+                for request in permissions:
+                    if not isinstance(request, dict) or not request.get("id"):
+                        continue
+                    self.schedule_permission(
+                        {**request, "sessionID": request.get("sessionID") or session_id}
+                    )
+        self.prune_pending()
+        log.info("pending recovery: %d new form(s)", recovered)
+
+    def prune_pending(self):
+        changed = False
+        with self.pending_lock:
+            entries = list(self.form_by_token.items())
+        for token, entry in entries:
+            session_id = str(entry.get("sessionID") or "")
+            form_id = str(entry.get("formID") or "")
+            if not session_id or not form_id:
+                with self.pending_lock:
+                    self.form_by_token.pop(token, None)
+                changed = True
+                continue
+            try:
+                detail = self.oc.form(session_id, form_id)
+            except ApiError as exc:
+                if exc.status not in (404, 409):
+                    continue
+                detail = None
+            status = None
+            if isinstance(detail, dict):
+                state = detail.get("state") or {}
+                if isinstance(state, dict):
+                    status = state.get("status")
+            if detail is None or status not in (None, "pending"):
+                with self.pending_lock:
+                    self.form_by_token.pop(token, None)
+                    for message_id, mapped in list(self.form_by_message.items()):
+                        if mapped == token:
+                            self.form_by_message.pop(message_id, None)
+                changed = True
+        if changed:
+            self.persist_pending()
 
     def remember_message(self, message_id: int, session_id: str):
         with self.state_lock:
@@ -890,6 +1030,7 @@ class Bridge:
                 "requestID": request_id,
                 "created": now,
             }
+        self.persist_pending()
 
         keyboard = [
             [
@@ -954,10 +1095,12 @@ class Bridge:
         }
         with self.pending_lock:
             self.form_by_token[token] = entry
+        self.persist_pending()
 
         if not self.send_form_field(token, entry):
             with self.pending_lock:
                 self.form_by_token.pop(token, None)
+            self.persist_pending()
 
     def send_form_field(self, token: str, entry: dict) -> bool:
         fields = entry["fields"]
@@ -1078,6 +1221,10 @@ class Bridge:
             entry = self.form_by_token.pop(token, None)
             if entry:
                 self.form_closed.add(entry["formID"])
+            for mapped_message, mapped_token in list(self.form_by_message.items()):
+                if mapped_token == token:
+                    self.form_by_message.pop(mapped_message, None)
+        self.persist_pending()
         if not entry:
             if message_id:
                 self.tg.edit(message_id, "\u231b This question has expired.")
@@ -1113,11 +1260,16 @@ class Bridge:
                 self.tg.edit(message_id, f"\u26a0\ufe0f Could not send answer: HTTP {exc.status}")
             with self.pending_lock:
                 self.form_by_token.pop(token, None)
+            self.persist_pending()
             return
 
         with self.pending_lock:
             self.form_by_token.pop(token, None)
             self.form_closed.add(entry["formID"])
+            for mapped_message, mapped_token in list(self.form_by_message.items()):
+                if mapped_token == token:
+                    self.form_by_message.pop(mapped_message, None)
+        self.persist_pending()
         if message_id:
             self.tg.edit(message_id, "\u2705 Answer sent.")
 
@@ -1203,11 +1355,18 @@ class Bridge:
         form_id = str(form_id or "")
         if not form_id:
             return
+        changed = False
         with self.pending_lock:
             self.form_closed.add(form_id)
             for token, entry in list(self.form_by_token.items()):
                 if entry.get("formID") == form_id:
                     self.form_by_token.pop(token, None)
+                    changed = True
+                    for mapped_message, mapped_token in list(self.form_by_message.items()):
+                        if mapped_token == token:
+                            self.form_by_message.pop(mapped_message, None)
+        if changed:
+            self.persist_pending()
 
     @staticmethod
     def last_assistant_text(messages) -> str:
@@ -1306,6 +1465,10 @@ class Bridge:
         text = (message.get("text") or "").strip()
         if not text:
             return
+        log.info(
+            "telegram inbound message%s",
+            " (reply)" if message.get("reply_to_message") else "",
+        )
 
         if text.startswith("/"):
             self.handle_command(text, message)
@@ -1323,6 +1486,11 @@ class Bridge:
             return
 
         if data.startswith("form:"):
+            parts = data.split(":")
+            log.info(
+                "telegram form callback action=%s",
+                parts[2] if len(parts) > 2 else "unknown",
+            )
             self.handle_form_callback(callback, data)
             return
 
@@ -1396,6 +1564,11 @@ class Bridge:
 
         if command == "/status":
             self.show_status()
+            return
+
+        if command == "/pending":
+            threading.Thread(target=self.recover_pending, daemon=True).start()
+            self.tg.send("Checking for pending questions\u2026")
             return
 
         if command == "/stop":
@@ -1513,6 +1686,13 @@ class Bridge:
                 form_token = self.form_by_message.get(str(reply_to_id))
                 permission_token = self.perm_by_message.get(str(reply_to_id))
             if form_token:
+                with self.pending_lock:
+                    live = form_token in self.form_by_token
+                if not live:
+                    self.tg.send(
+                        "\u231b This question has expired. Wait for a new question notification."
+                    )
+                    return
                 self.handle_form_text(form_token, reply_to_id, text)
                 return
             if permission_token:
@@ -1529,6 +1709,7 @@ class Bridge:
             )
             return
 
+        log.info("telegram prompt -> %s (%d chars)", session_id, len(text))
         try:
             self.oc.prompt(session_id, text)
         except ApiError as exc:

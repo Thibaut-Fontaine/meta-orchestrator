@@ -125,6 +125,7 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.edits = []
         self.answered = []
+        self.sent = []
 
     def edit(self, message_id, text) -> None:
         self.edits.append((message_id, text))
@@ -132,14 +133,18 @@ class FakeTelegram:
     def answer_callback(self, callback_id, text="") -> None:
         self.answered.append((callback_id, text))
 
-    def send(self, *args, **kwargs) -> None:
-        pass
+    def send(self, text, **kwargs):
+        self.sent.append((text, kwargs))
+        return {"message_id": len(self.sent)}
 
 
 class FakeOpenCode:
     def __init__(self) -> None:
         self.replied = []
         self.cancelled = []
+        self.prompts = []
+        self.sessions = [{"id": "ses_test", "title": "Test session"}]
+        self.pending_forms = []
 
     def session(self, session_id):
         return {"id": session_id, "title": "Test session"}
@@ -155,6 +160,19 @@ class FakeOpenCode:
         self.cancelled.append((session_id, form_id))
         return True
 
+    def prompt(self, session_id, text):
+        self.prompts.append((session_id, text))
+        return True
+
+    def request(self, method, path, body=None, timeout=30):
+        if path.startswith("/api/session?"):
+            return self.sessions
+        if path.endswith("/form"):
+            return self.pending_forms
+        if path.endswith("/permission"):
+            return []
+        return []
+
 
 def fake_bridge():
     instance = bridge.Bridge.__new__(bridge.Bridge)
@@ -164,9 +182,19 @@ def fake_bridge():
     instance.form_closed = set()
     instance.form_by_token = {}
     instance.form_by_message = {}
+    instance.perm_by_token = {}
+    instance.perm_by_message = {}
+    instance.state_lock = threading.RLock()
+    instance.state = {
+        "forms": {},
+        "formMessages": {},
+        "permissions": {},
+        "permissionMessages": {},
+    }
     instance.tg = FakeTelegram()
     instance.oc = FakeOpenCode()
     instance.sent = []
+    instance.save_state = lambda: None
 
     def enqueue(text, **kwargs):
         instance.sent.append((text, kwargs))
@@ -233,6 +261,44 @@ class FormFlowTests(unittest.TestCase):
         )
         self.assertEqual(self.instance.oc.cancelled, [("ses_test", "frm_test")])
         self.assertEqual(self.instance.form_by_token, {})
+
+    def test_pending_form_routes_survive_a_restart(self) -> None:
+        self.instance.notify_form(self.form)
+        token = next(iter(self.instance.form_by_token))
+        self.instance.form_by_message["42"] = token
+        self.instance.persist_pending()
+
+        restarted = fake_bridge()
+        restarted.state = self.instance.state
+        restarted.load_pending_state()
+        self.assertIn(token, restarted.form_by_token)
+        self.assertEqual(restarted.form_by_message.get("42"), token)
+        restarted.handle_form_callback(
+            {"id": "cb1", "message": {"message_id": 42}},
+            f"form:{token}:opt:1",
+        )
+        self.assertIn(token, restarted.form_by_token)
+
+    def test_stale_form_reply_does_not_become_a_prompt(self) -> None:
+        self.instance.form_by_message["99"] = "deadbeef"
+        self.instance.state["lastSession"] = "ses_test"
+        self.instance.handle_prompt(
+            "my answer",
+            {"message_id": 1, "reply_to_message": {"message_id": 99}},
+        )
+        self.assertEqual(self.instance.oc.prompts, [])
+        self.assertTrue(self.instance.tg.sent)
+        self.assertIn("expired", self.instance.tg.sent[0][0].lower())
+
+    def test_startup_recovery_notifies_an_unseen_form(self) -> None:
+        self.instance.oc.pending_forms = [self.form]
+        self.instance.recover_pending()
+        for _ in range(50):
+            if self.instance.sent:
+                break
+            bridge.time.sleep(0.01)
+        self.assertTrue(self.instance.sent)
+        self.assertIn("Database", self.instance.sent[0][0])
 
 
 if __name__ == "__main__":
