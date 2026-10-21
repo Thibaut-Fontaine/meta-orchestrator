@@ -447,7 +447,11 @@ fn task_markdown(cfg: &Config, spec: &ProjectSpec) -> String {
         spec.milestones.clone()
     };
     out.push_str("\n## Milestones\n\n");
-    out.push_str("Track them with `mox milestone` (do not edit `MILESTONES.json` by hand).\n\n");
+    out.push_str(
+        "Track them with `mox milestone` when mox is available. For manual \
+         continuation, see `MANUAL.md`; direct `MILESTONES.json` edits are allowed \
+         then.\n\n",
+    );
     out.push_str("| id | milestone | complexity | estimate | algorithm |\n");
     out.push_str("|---|---|---|---|---|\n");
     for milestone in &milestones {
