@@ -56,6 +56,7 @@ fn run() -> Result<()> {
         meta_orchestrator::cli::Command::Plan {
             yes, interactive, ..
         } => *interactive || (!*yes && std::io::stdin().is_terminal()),
+        meta_orchestrator::cli::Command::Up { yes, .. } => !*yes && std::io::stdin().is_terminal(),
         _ => false,
     };
 

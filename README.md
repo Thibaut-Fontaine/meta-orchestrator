@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 325 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 329 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -28,8 +28,10 @@ ideas.txt ──► brain (opencode) ──► questions ──► your answers
    **token budget** for the whole project. The token estimate targets
    `estimate_model` (default `deepseek-v4.1-flash`) and is shown in `mox plan`,
    `mox up` and each project's `TASK.md`.
-2. **You answer** — interactively, or by editing `answers.toml` and re-running
-   `mox plan --answers`.
+2. **You answer and approve** — answer interactively, or edit `answers.toml` and
+   re-run `mox plan --answers`. Review the difficulty, time, token budget and
+   milestones, then run `mox plan --approve`. `mox up` refuses an unapproved
+   plan unless you use `--yes`.
 3. **`mox up`** scaffolds one git repository per project, commits it, creates a
    **private** GitHub repository with `gh`, pushes, then launches one OpenCode
    agent per project with `opencode run --auto`.
@@ -90,6 +92,8 @@ next: mox up
 
 $ $EDITOR ~/.local/state/meta-orchestrator/answers.toml
 $ mox plan --answers ~/.local/state/meta-orchestrator/answers.toml --deep
+# review difficulty, time, token budget and milestones
+$ mox plan --approve
 $ mox up                       # scaffold + private repos + parallel agents
 $ mox status
 $ mox logs expense-tracker -n 80
@@ -102,6 +106,8 @@ Useful flags:
 | `mox plan --yes` | accept defaults, never ask |
 | `mox plan --refresh` | ask the brain again |
 | `mox plan --deep` | second pass: refine summary/acceptance/risks from answers |
+| `mox plan --approve` | approve the reviewed plan for execution |
+| `mox up --yes` | skip the approval prompt (automation) |
 | `mox up --dry-run` (or global `--dry-run`) | show everything, touch nothing |
 | `mox up --only slug` | one project only (repeatable) |
 | `mox up --no-github` | local work only, no repo creation |
@@ -309,6 +315,26 @@ count, `mox` falls back to **2,000 tokens per planned minute**, clamped to
 2k–50M. The number is a planning budget, not a hard cap: mox does not enforce a
 token ceiling because OpenCode does not expose one reliably.
 
+### Approval gate
+
+`mox plan` never starts work. It writes the plan with `approved = false` and
+prints the project assessment plus every milestone with its complexity and
+estimate. Review it, then either:
+
+```bash
+mox plan --approve          # approve the reviewed plan
+mox up                      # starts because the plan is approved
+```
+
+`mox up` refuses an unapproved plan. In an interactive terminal it prints the
+plan again and asks `Approve this plan and start the agents? [y/N]`; anything
+other than `y`/`yes` stops before scaffolding or launching. In a script or CI,
+use `mox up --yes` (or `mox plan --approve`) explicitly. `mox up --dry-run` and
+`mox up --no-run` do not start agents and therefore do not require approval.
+
+Planning again, applying new answers, using `--deep`, or adopting another project
+resets approval. The approval timestamp is stored in `plan.json`.
+
 ### Cross-project calibration
 
 Every completed milestone is appended to `~/.local/state/meta-orchestrator/stats.json`
@@ -407,10 +433,44 @@ detached pid, milestone table with ETA, open todos, pending human checks,
 
 If the workstation is gone: `ssh vps-ovh`, read `~/mox-remote/RECOVERY.md` and
 `~/mox-remote/<slug>/RECOVERY.md`, clone the private repo, then run
-`mox project adopt` + `mox up --resume`.
+`mox project adopt`, `mox plan --approve`, and `mox up --resume`.
 
 `recovery_enabled = true` and `recovery_interval_secs = 120` are configurable;
 a VPS outage only prints a warning and never fails a run.
+
+## Continue a project without mox
+
+Every scaffolded project is self-contained. `mox` is a scheduler and reporter;
+it is **not required** to read, edit, build, test or continue the project.
+
+```bash
+cd ~/mox-projects/<slug>
+opencode
+```
+
+Or start an agent non-interactively:
+
+```bash
+opencode run --auto "Read AGENTS.md, TASK.md, TASKS.md and MILESTONES.json. \
+Continue from STATUS.md, keep the tests green, update the board and commit/push when done."
+```
+
+The project contains everything needed:
+
+- `TASK.md` — brief and definition of done;
+- `TASKS.md` — milestone checklist;
+- `MILESTONES.json` — plan and live progress board;
+- `CHECKS.md` — human checks;
+- `AGENTS.md` — project rules;
+- `opencode.json` — project permissions;
+- `MANUAL.md` — the same manual-continuation instructions.
+
+If mox is unavailable, edit `MILESTONES.json` directly: keep it valid JSON and
+update `status`, timestamps, `actual_secs` and todo flags consistently. Keep
+`STATUS.md` current and use normal Git commands. No mox state outside the project
+directory is required. You lose the scheduler, live ETA and mox notifications,
+but not the ability to finish the work. If the project is already tracked by
+mox, `mox up --resume` picks it up again later.
 
 ## Operations
 
@@ -615,7 +675,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 325 unit + 4 property + 8 end-to-end tests
+cargo test                 # 329 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

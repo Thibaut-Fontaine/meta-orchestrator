@@ -210,6 +210,7 @@ mod tests {
             source_hash: None,
             host: None,
             specs: vec![],
+            ..Plan::default()
         };
         save_plan(&path, &plan).unwrap();
         assert_eq!(load_plan(&path).unwrap().unwrap(), plan);

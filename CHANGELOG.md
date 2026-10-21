@@ -10,6 +10,11 @@
   2,000 tokens per planned minute (clamped to 2k–50M).
 - `estimate_model` / `MOX_ESTIMATE_MODEL`; adopted projects get a fallback
   assessment from their milestones.
+- Plan approval gate: `mox up` refuses an unapproved plan, shows the assessment
+  and milestones, and asks `y/N`; `mox plan --approve` approves after review and
+  `mox up --yes` bypasses for automation. Re-planning or adopting resets approval.
+- Every project gets `MANUAL.md` and a "Continue without mox" README section;
+  `AGENTS.md` documents direct `MILESTONES.json` edits when mox is unavailable.
 
 ## 0.9.0
 

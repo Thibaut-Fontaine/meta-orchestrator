@@ -111,6 +111,7 @@ pub struct PlanOptions {
     pub yes: bool,
     pub interactive: bool,
     pub deep: bool,
+    pub approve: bool,
 }
 
 /// Options for `mox up`.
@@ -126,6 +127,7 @@ pub struct UpOptions {
     pub target: String,
     pub owner: Option<String>,
     pub detach: bool,
+    pub yes: bool,
 }
 
 impl Default for UpOptions {
@@ -141,6 +143,7 @@ impl Default for UpOptions {
             target: "local".to_string(),
             owner: None,
             detach: false,
+            yes: false,
         }
     }
 }
@@ -198,6 +201,7 @@ impl App {
                 yes,
                 interactive,
                 deep,
+                approve,
             } => self.cmd_plan(
                 PlanOptions {
                     ideas,
@@ -206,6 +210,7 @@ impl App {
                     yes,
                     interactive,
                     deep,
+                    approve,
                 },
                 out,
             ),
@@ -220,6 +225,7 @@ impl App {
                 target,
                 owner,
                 detach,
+                yes,
             } => self.cmd_up(
                 UpOptions {
                     only,
@@ -232,6 +238,7 @@ impl App {
                     target,
                     owner,
                     detach,
+                    yes,
                 },
                 out,
             ),
@@ -579,9 +586,101 @@ impl App {
         Ok(())
     }
 
+    fn print_plan(&self, plan: &Plan, out: &mut dyn Write) -> Result<()> {
+        if let Some(host) = &plan.host {
+            writeln!(out, "estimates for: {}", host.describe())?;
+        }
+        if !self.cfg.estimate_model.trim().is_empty() {
+            writeln!(
+                out,
+                "token estimates for: {}",
+                self.cfg.estimate_model.trim()
+            )?;
+        }
+        writeln!(out, "plan for {} project(s):", plan.specs.len())?;
+        writeln!(
+            out,
+            "  {:<28} {:<12} {:<8} {:<8} {:<8} title",
+            "slug", "difficulty", "time", "tokens", "questions"
+        )?;
+        for spec in &plan.specs {
+            let unanswered = spec.unanswered().len();
+            writeln!(
+                out,
+                "  {:<28} {:<12} {:<8} {:<8} {:<8} {}",
+                spec.slug,
+                spec.difficulty.as_str(),
+                format_secs(crate::estimate::planned_secs(spec)),
+                format!("~{}", format_tokens(crate::estimate::planned_tokens(spec))),
+                format!(
+                    "{}/{}",
+                    spec.questions.len() - unanswered,
+                    spec.questions.len()
+                ),
+                truncate_chars(&spec.title, 48)
+            )?;
+        }
+        writeln!(out, "\nmilestones:")?;
+        for spec in &plan.specs {
+            writeln!(out, "  {}", spec.slug)?;
+            let milestones = if spec.milestones.is_empty() {
+                crate::milestones::fallback_for(spec)
+            } else {
+                spec.milestones.clone()
+            };
+            for milestone in milestones {
+                writeln!(
+                    out,
+                    "    {} {:<38} {:<10} ~{}",
+                    milestone.id,
+                    truncate_chars(&milestone.title, 38),
+                    milestone.complexity.as_str(),
+                    format_secs(milestone.estimate_secs)
+                )?;
+            }
+        }
+        writeln!(
+            out,
+            "\napproval: {}",
+            if plan.approved {
+                format!(
+                    "approved{}",
+                    plan.approved_at
+                        .as_deref()
+                        .map(|at| format!(" at {at}"))
+                        .unwrap_or_default()
+                )
+            } else {
+                "not approved — review, then run `mox plan --approve` or `mox up`".to_string()
+            }
+        )?;
+        Ok(())
+    }
+
+    fn approve_plan(&mut self, plan: &mut Plan, state: &mut State) -> Result<()> {
+        plan.approved = true;
+        plan.approved_at = Some(now_rfc3339());
+        state::save_plan(&self.cfg.plan_file(), plan)?;
+        state.plan = Some(plan.clone());
+        self.save_state(state)
+    }
+
     fn cmd_plan(&mut self, opts: PlanOptions, out: &mut dyn Write) -> Result<()> {
         self.ensure_layout()?;
         let _lock = self.up_lock()?;
+        if opts.approve && opts.ideas.is_none() {
+            let mut plan = state::load_plan(&self.cfg.plan_file())?
+                .context("no plan to approve; run `mox plan --ideas <file>` first")?;
+            if self.dry_run {
+                writeln!(out, "[dry-run] would approve the plan")?;
+                return Ok(());
+            }
+            let mut state = self.load_state()?;
+            self.approve_plan(&mut plan, &mut state)?;
+            self.print_plan(&plan, out)?;
+            writeln!(out, "plan approved; `mox up` may now start it")?;
+            return Ok(());
+        }
         let cached = state::load_plan(&self.cfg.plan_file())?;
         let source_name;
         let plan_hash: Option<String>;
@@ -725,11 +824,18 @@ impl App {
             }
         }
 
+        let approved_at = if opts.approve {
+            Some(now_rfc3339())
+        } else {
+            None
+        };
         let plan = Plan {
             created_at: now_rfc3339(),
             source: source_name,
             source_hash: plan_hash,
             host: host_profile,
+            approved: opts.approve,
+            approved_at,
             specs,
         };
         state::save_plan(&self.cfg.plan_file(), &plan)?;
@@ -774,39 +880,7 @@ impl App {
         );
 
         writeln!(out)?;
-        if let Some(host) = &plan.host {
-            writeln!(out, "estimates for: {}", host.describe())?;
-        }
-        if !self.cfg.estimate_model.trim().is_empty() {
-            writeln!(
-                out,
-                "token estimates for: {}",
-                self.cfg.estimate_model.trim()
-            )?;
-        }
-        writeln!(out, "plan for {} project(s):", plan.specs.len())?;
-        writeln!(
-            out,
-            "  {:<28} {:<12} {:<8} {:<8} {:<8} title",
-            "slug", "difficulty", "time", "tokens", "questions"
-        )?;
-        for spec in &plan.specs {
-            let unanswered = spec.unanswered().len();
-            writeln!(
-                out,
-                "  {:<28} {:<12} {:<8} {:<8} {:<8} {}",
-                spec.slug,
-                spec.difficulty.as_str(),
-                format_secs(crate::estimate::planned_secs(spec)),
-                format!("~{}", format_tokens(crate::estimate::planned_tokens(spec))),
-                format!(
-                    "{}/{}",
-                    spec.questions.len() - unanswered,
-                    spec.questions.len()
-                ),
-                truncate_chars(&spec.title, 48)
-            )?;
-        }
+        self.print_plan(&plan, out)?;
         writeln!(
             out,
             "\nquestions: {}",
@@ -844,7 +918,12 @@ impl App {
         }
         writeln!(
             out,
-            "next: mox up{}",
+            "next: {}{}",
+            if plan.approved {
+                "mox up"
+            } else {
+                "review the milestones, then `mox plan --approve` (or run `mox up` to approve interactively)"
+            },
             if self.dry_run { " (dry run)" } else { "" }
         )?;
         Ok(())
@@ -890,7 +969,37 @@ impl App {
         self.ensure_layout()?;
         let _lock = self.up_lock()?;
         let mut state = self.load_state()?;
-        let plan = self.load_plan()?;
+        let mut plan = self.load_plan()?;
+
+        if !self.dry_run && !plan.approved {
+            if opts.yes {
+                self.approve_plan(&mut plan, &mut state)?;
+                writeln!(out, "plan approved (--yes)")?;
+            } else if !opts.no_run {
+                self.print_plan(&plan, out)?;
+                if self.interactive {
+                    let answer = self
+                        .asker
+                        .ask("Approve this plan and start the agents? [y/N] ", Some("N"))?;
+                    let approved = answer
+                        .as_deref()
+                        .map(|value| {
+                            matches!(value.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+                        })
+                        .unwrap_or(false);
+                    if !approved {
+                        bail!("plan not approved; nothing was started");
+                    }
+                    self.approve_plan(&mut plan, &mut state)?;
+                    writeln!(out, "plan approved")?;
+                } else {
+                    bail!(
+                        "plan is not approved; review it with `mox plan --approve` \
+                         or run `mox up --yes` to approve non-interactively"
+                    );
+                }
+            }
+        }
 
         let specs: Vec<ProjectSpec> = if opts.only.is_empty() {
             plan.specs.clone()
@@ -1961,7 +2070,8 @@ impl App {
         if plan.get(&slug).is_none() {
             plan.specs.push(spec.clone());
             plan.created_at = now_rfc3339();
-            plan.source = plan.source.clone();
+            plan.approved = false;
+            plan.approved_at = None;
             state::save_plan(&self.cfg.plan_file(), &plan)?;
         }
         let scaffolding = scaffold_project(&self.cfg, &spec)?;
@@ -3479,6 +3589,8 @@ mod tests {
             source: "test".into(),
             source_hash: None,
             host: None,
+            approved: true,
+            approved_at: Some(now_rfc3339()),
             specs,
         };
         state::save_plan(&app.cfg.plan_file(), &plan).unwrap();
@@ -3518,6 +3630,95 @@ mod tests {
         assert!(text.contains("demo"));
         assert!(app.cfg.answers_file().exists());
         assert!(app.cfg.questions_file().exists());
+    }
+
+    #[test]
+    fn plan_approve_marks_the_cached_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        write_plan(&app, vec![spec("demo")]);
+        let mut plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        plan.approved = false;
+        plan.approved_at = None;
+        state::save_plan(&app.cfg.plan_file(), &plan).unwrap();
+
+        let mut out = Vec::new();
+        app.cmd_plan(
+            PlanOptions {
+                approve: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        assert!(plan.approved);
+        assert!(plan.approved_at.is_some());
+        assert!(String::from_utf8(out).unwrap().contains("plan approved"));
+    }
+
+    #[test]
+    fn up_refuses_an_unapproved_plan_and_yes_approves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        write_plan(&app, vec![spec("demo")]);
+        let mut plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        plan.approved = false;
+        plan.approved_at = None;
+        state::save_plan(&app.cfg.plan_file(), &plan).unwrap();
+
+        let mut out = Vec::new();
+        let err = app
+            .cmd_up(
+                UpOptions {
+                    only: vec!["demo".into()],
+                    ..Default::default()
+                },
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("not approved"), "{err:#}");
+
+        app.cmd_up(
+            UpOptions {
+                only: vec!["demo".into()],
+                no_github: true,
+                no_run: true,
+                yes: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        assert!(plan.approved);
+    }
+
+    #[test]
+    fn up_waits_for_an_interactive_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = temp_app(dir.path());
+        write_plan(&app, vec![spec("demo")]);
+        let mut plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        plan.approved = false;
+        plan.approved_at = None;
+        state::save_plan(&app.cfg.plan_file(), &plan).unwrap();
+        app.interactive = true;
+        app = app.with_asker(Box::new(ScriptedAsker::new(vec![Some("y".into())])));
+
+        let mut out = Vec::new();
+        app.cmd_up(
+            UpOptions {
+                only: vec!["demo".into()],
+                no_github: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        let plan = state::load_plan(&app.cfg.plan_file()).unwrap().unwrap();
+        assert!(plan.approved);
+        assert!(String::from_utf8(out).unwrap().contains("plan approved"));
     }
 
     #[test]
@@ -4805,6 +5006,10 @@ mod tests {
         assert_eq!(spec.difficulty, crate::model::Complexity::High);
         assert_eq!(spec.estimated_tokens, 220_000);
         assert_eq!(spec.token_estimate_model, app.cfg.estimate_model);
+        assert!(
+            !plan.approved,
+            "adopting a project must require re-approval"
+        );
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("adopted legacy"));
         assert!(out.contains("estimate: high"));

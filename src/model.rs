@@ -281,6 +281,12 @@ pub struct Plan {
     /// Hardware profile used for the planning call (best effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<crate::host::HostProfile>,
+    /// A human explicitly approved this exact plan for execution.
+    #[serde(default)]
+    pub approved: bool,
+    /// When the approval was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
     #[serde(default)]
     pub specs: Vec<ProjectSpec>,
 }

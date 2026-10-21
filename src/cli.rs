@@ -77,6 +77,10 @@ pub enum Command {
         /// Second planning pass: refine the spec from the answers.
         #[arg(long)]
         deep: bool,
+
+        /// Mark the existing plan as approved for execution.
+        #[arg(long)]
+        approve: bool,
     },
 
     /// Create workspaces, private GitHub repos, then run agents in parallel.
@@ -120,6 +124,10 @@ pub enum Command {
         /// Start VPS runs detached (survives shutting this computer down).
         #[arg(long)]
         detach: bool,
+
+        /// Skip the plan-approval prompt and approve the plan (automation).
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Show the state of every project, with milestone progress and ETA.
@@ -611,6 +619,14 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_plan_approve_and_up_yes() {
+        let cli = Cli::try_parse_from(["mox", "plan", "--approve"]).unwrap();
+        assert!(matches!(cli.command, Command::Plan { approve: true, .. }));
+        let cli = Cli::try_parse_from(["mox", "up", "--yes"]).unwrap();
+        assert!(matches!(cli.command, Command::Up { yes: true, .. }));
     }
 
     #[test]

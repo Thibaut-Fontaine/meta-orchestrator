@@ -7,16 +7,25 @@ mox \- parallel OpenCode project orchestrator
 .SH DESCRIPTION
 mox turns project ideas into private repositories worked on by isolated
 OpenCode agents, and tracks milestones, ETA, human checks and costs of waiting.
+.PP
+Every project is self-contained. It can be continued without mox by running
+.B opencode
+in the project directory; see the generated MANUAL.md.
 .SH COMMANDS
 .TP
 .B init [--profile minimal|standard|paranoid]
 Write the config and create the projects/cache tree.
 .TP
-.B plan --ideas FILE [--answers FILE] [--yes]
+.B plan --ideas FILE [--answers FILE] [--yes] [--deep] [--approve]
 Ask the planning model for a difficulty/time/token assessment, questions and a milestone plan.
+.B --approve
+marks the reviewed cached plan as approved for execution.
 .TP
-.B up [--target local|vps|auto] [--detach] [--resume] [--retry-failed]
-Scaffold, create private repositories and run agents.
+.B up [--target local|vps|auto] [--detach] [--resume] [--retry-failed] [--yes]
+Scaffold, create private repositories and run agents. An unapproved plan is refused;
+interactive runs ask for confirmation, and
+.B --yes
+bypasses that gate.
 .TP
 .B status [--watch] [--verbose] [--json]
 Show lifecycle, milestone progress, ETA, disk and repo.

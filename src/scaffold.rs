@@ -116,11 +116,57 @@ Rules:
   done.
 "#;
 
+const MANUAL_MD: &str = r#"# Continue without mox
+
+This project is self-contained. `mox` schedules agents and tracks progress; it is
+**not required** to read, edit, build, test or continue the project.
+
+## Start OpenCode manually
+
+Run this in the project directory:
+
+```bash
+opencode
+```
+
+Or start non-interactively and let the agent continue from the brief:
+
+```bash
+opencode run --auto "Read AGENTS.md, TASK.md, TASKS.md and MILESTONES.json. Continue from STATUS.md, keep the tests green, update the board and commit/push when done."
+```
+
+`opencode.json` in this directory supplies the project permissions; the rules in
+`AGENTS.md` still apply even when mox is not running.
+
+## Files that matter
+
+| File | Purpose |
+| --- | --- |
+| `TASK.md` | Brief, constraints and definition of done |
+| `TASKS.md` | Milestone checklist with estimates |
+| `MILESTONES.json` | Plan and live progress board |
+| `CHECKS.md` | Items a human must verify |
+| `STATUS.md` | Last known state and next actions (agents keep it current) |
+| `AGENTS.md` | Project rules |
+| `opencode.json` | OpenCode permissions for this project |
+
+## Progress without mox
+
+- `MILESTONES.json` is ordinary JSON. If mox is unavailable, edit it directly:
+  keep it valid, update `status`, `started_at`, `finished_at`, `actual_secs` and
+  the todo flags consistently.
+- Keep `STATUS.md` current: what works, what is untested, and the next three
+  actions.
+- Use the project's normal build/test commands and Git workflow. No mox state
+  outside this directory is required.
+- Never put tokens, keys, passwords or personal data in any project file.
+"#;
+
 const AGENTS_MD: &str = r#"# AGENTS.md — project rules
 
 This project was scaffolded by `mox` (meta-orchestrator) and is worked on by an
-autonomous agent. Read `~/AGENTS-GLOBAL.md` first; project rules win where they
-are stricter.
+autonomous agent. Read `~/AGENTS-GLOBAL.md` if it exists; project rules win where
+they are stricter.
 
 ## Non-negotiables
 
@@ -159,8 +205,9 @@ why in `DECISIONS.md`.
 
 ## Milestones (mandatory)
 
-`MILESTONES.json` is the plan and the live progress board. Work in order and
-update it only through mox:
+`MILESTONES.json` is the plan and the live progress board. Work in order.
+
+When mox is available, update it through mox:
 
 * before starting: `mox milestone start m1`
 * tick a sub-todo: `mox milestone todo m1 1` (1-based, see `mox milestone list`)
@@ -169,9 +216,12 @@ update it only through mox:
 * blocked: `mox milestone block m1 --note "what is missing"`
 * skip only with a recorded reason: `mox milestone skip m1`
 
-Never edit `MILESTONES.json` by hand. Commit it with the milestone's work; mox
-uses it to report live progress and the ETA. If the plan no longer fits, record
-why in `DECISIONS.md` and add sub-todos rather than silently skipping ahead.
+If you are continuing **manually without mox** (see `MANUAL.md`), edit
+`MILESTONES.json` directly and keep it valid JSON; update `status`, timestamps,
+`actual_secs` and todo flags consistently. Never edit it by hand while a mox run
+is active. Commit it with the milestone's work; mox uses it to report live
+progress and the ETA. If the plan no longer fits, record why in `DECISIONS.md`
+and add sub-todos rather than silently skipping ahead.
 
 ## Parallel safety
 
@@ -213,6 +263,9 @@ create/delete/edit`, `gh api/auth/search`, ssh/scp, and process/service signals.
 A refusal is a decision, not an obstacle: do not bypass it with an absolute
 path; record the need in `CHECKS.md`.
 
+If you start OpenCode manually without the mox wrappers, follow the same rules
+by hand. `MANUAL.md` explains the manual workflow.
+
 ## Definition of done
 
 See the "Definition of done" section of `TASK.md`. Finish by updating
@@ -240,6 +293,7 @@ pub fn scaffold_project(cfg: &Config, spec: &ProjectSpec) -> Result<Scaffold> {
     let files = vec![
         ("README.md", readme(spec)),
         ("AGENTS.md", AGENTS_MD.to_string()),
+        ("MANUAL.md", MANUAL_MD.to_string()),
         (".gitignore", GITIGNORE.to_string()),
         ("TASK.md", task_markdown(cfg, spec)),
         ("CHECKS.md", CHECKS_MD.to_string()),
@@ -316,8 +370,10 @@ fn tasks_markdown(spec: &ProjectSpec) -> String {
 
 fn readme(spec: &ProjectSpec) -> String {
     format!(
-        "# {}\n\n{}\n\n---\n\nScaffolded by `mox`. See `TASK.md` for the brief and \
-         `AGENTS.md` for the rules.\n",
+        "# {}\n\n{}\n\n## Continue without mox\n\nThis project is self-contained. \
+         Run `opencode` in this directory, or see `MANUAL.md` for the exact \
+         command and the files that matter.\n\n---\n\nScaffolded by `mox`. See \
+         `TASK.md` for the brief and `AGENTS.md` for the rules.\n",
         spec.title,
         if spec.summary.is_empty() {
             spec.idea.as_str()
@@ -469,10 +525,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scaffolding = scaffold_project(&cfg(dir.path()), &spec()).unwrap();
         assert!(!scaffolding.existed);
-        assert_eq!(scaffolding.created.len(), 8);
+        assert_eq!(scaffolding.created.len(), 9);
         let project = dir.path().join("demo");
         assert!(project.join("README.md").exists());
         assert!(project.join("AGENTS.md").exists());
+        assert!(project.join("MANUAL.md").exists());
         assert!(project.join(".gitignore").exists());
         assert!(project.join("TASK.md").exists());
         assert!(project.join("CHECKS.md").exists());
@@ -500,6 +557,14 @@ mod tests {
         assert!(task.contains("## Milestones"));
         assert!(task.contains("m1"));
         assert!(task.contains("mox milestone"));
+        let manual = std::fs::read_to_string(project.join("MANUAL.md")).unwrap();
+        assert!(manual.contains("opencode"));
+        assert!(manual.contains("MILESTONES.json"));
+        assert!(manual.contains("not required"));
+        let agents = std::fs::read_to_string(project.join("AGENTS.md")).unwrap();
+        assert!(agents.contains("manually without mox"));
+        let readme = std::fs::read_to_string(project.join("README.md")).unwrap();
+        assert!(readme.contains("Continue without mox"));
     }
 
     #[test]

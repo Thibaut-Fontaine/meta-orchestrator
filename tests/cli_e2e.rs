@@ -186,7 +186,15 @@ fn full_workflow_init_plan_up_status_clean() {
     assert!(h.state.join("answers.toml").exists());
     assert!(h.state.join("QUESTIONS.md").exists());
 
-    let out = h.run_ok(&["up"]);
+    let refused = h.run(&["up"]);
+    assert!(
+        !refused.status.success(),
+        "up must refuse an unapproved plan"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("not approved"), "{stderr}");
+
+    let out = h.run_ok(&["up", "--yes"]);
     assert!(
         out.contains("private repo: https://github.com/test/demo"),
         "{out}"
@@ -198,12 +206,16 @@ fn full_workflow_init_plan_up_status_clean() {
     for file in [
         "README.md",
         "AGENTS.md",
+        "MANUAL.md",
         "TASK.md",
         "CHECKS.md",
         ".gitignore",
     ] {
         assert!(project.join(file).exists(), "missing {file}");
     }
+    let manual = std::fs::read_to_string(project.join("MANUAL.md")).unwrap();
+    assert!(manual.contains("opencode"));
+    assert!(manual.contains("MILESTONES.json"));
     let tracked = Command::new("git")
         .args(["ls-files"])
         .current_dir(&project)
@@ -267,7 +279,7 @@ fn public_repo_is_refused_and_agent_does_not_run() {
     h.run_ok(&["init"]);
     h.run_ok(&["plan", "--ideas", ideas.to_str().unwrap(), "--yes"]);
 
-    let out = h.run(&["up", "--max-parallel", "1"]);
+    let out = h.run(&["up", "--max-parallel", "1", "--yes"]);
     // The failure is reported per project and mox keeps going.
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);

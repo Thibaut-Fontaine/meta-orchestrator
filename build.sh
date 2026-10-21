@@ -88,6 +88,7 @@ Next steps:
   mox init                 # write config + create ~/mox-projects
   mox doctor               # check opencode, gh, git, disk, VPS
   mox plan --ideas ideas.example.txt
+  mox plan --approve       # review the assessment and milestones first
   mox up
   mox status --watch       # live milestone progress and ETA
 NEXT
