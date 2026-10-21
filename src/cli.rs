@@ -313,6 +313,17 @@ pub enum Command {
         action: NotifyAction,
     },
 
+    /// Check the linked DeepSeek account balance.
+    Balance {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+
+        /// Send a Telegram notification for each newly crossed threshold.
+        #[arg(long)]
+        notify: bool,
+    },
+
     /// Inspect the VPS or get an execution-target recommendation.
     Vps {
         #[command(subcommand)]
@@ -1031,6 +1042,18 @@ mod tests {
             Command::Bot {
                 once: true,
                 allow_remote: false
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_balance_flags() {
+        let cli = Cli::try_parse_from(["mox", "balance", "--json", "--notify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Balance {
+                json: true,
+                notify: true
             }
         ));
     }

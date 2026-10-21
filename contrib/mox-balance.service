@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the DeepSeek balance and notify on a new threshold
+Documentation=file:///home/thibaut/meta-orchestrator/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mox balance --notify
+Nice=10

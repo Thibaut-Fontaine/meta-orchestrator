@@ -42,6 +42,10 @@ Read-only VPS checks, approvals, detached sync and ghost audit.
 .B bot [--once]
 Read-only Telegram bot (never run on the VPS unless explicitly allowed).
 .TP
+.B balance [--json] [--notify]
+Check the linked DeepSeek credit. With --notify, send a Telegram message when a
+new $10/$5/$3/$2/$1/$0.50 threshold is crossed.
+.TP
 .B stats [--json] [--reset --yes]
 Cross-project milestone timing calibration.
 .TP

@@ -89,7 +89,11 @@ pub struct Config {
     /// Default false; only set by a human who explicitly wants it.
     pub allow_remote_bots: bool,
     pub telegram_chat_id: String,
+    /// Environment variable that holds the bot token.
     pub telegram_token_env: String,
+    /// Optional 0600 file containing the bot token, or a JSON object with a
+    /// `botToken` field (the existing OpenCode bridge config works).
+    pub telegram_token_file: String,
     /// Generic JSON webhook notifications.
     pub notify_webhook: bool,
     pub webhook_url: String,
@@ -138,6 +142,7 @@ impl Default for Config {
             allow_remote_bots: false,
             telegram_chat_id: String::new(),
             telegram_token_env: "MOX_TELEGRAM_TOKEN".to_string(),
+            telegram_token_file: String::new(),
             notify_webhook: false,
             webhook_url: String::new(),
         }
@@ -260,6 +265,9 @@ impl Config {
         }
         if let Some(v) = var("MOX_AUTO_APPROVE") {
             self.auto_approve = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = var("MOX_TELEGRAM_TOKEN_FILE") {
+            self.telegram_token_file = v;
         }
         if let Some(v) = var("MOX_ALLOW_REMOTE_BOTS") {
             self.allow_remote_bots = matches!(v.as_str(), "1" | "true" | "yes" | "on");
@@ -419,6 +427,7 @@ notify_telegram = {notify_telegram}
 allow_remote_bots = {allow_remote_bots}
 telegram_chat_id = {telegram_chat_id:?}
 telegram_token_env = {telegram_token_env:?}
+telegram_token_file = {telegram_token_file:?}
 notify_webhook = {notify_webhook}
 webhook_url = {webhook_url:?}
 "#,
@@ -460,6 +469,7 @@ webhook_url = {webhook_url:?}
             allow_remote_bots = self.allow_remote_bots,
             telegram_chat_id = self.telegram_chat_id,
             telegram_token_env = self.telegram_token_env,
+            telegram_token_file = self.telegram_token_file,
             notify_webhook = self.notify_webhook,
             webhook_url = self.webhook_url,
         )

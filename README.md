@@ -3,7 +3,7 @@
 Turn a rough list of project ideas into **specified, private GitHub repositories**
 worked on by **several isolated OpenCode agents in parallel**.
 
-`mox` is a Rust CLI (TDD, 330 unit + 4 property + 8 end-to-end tests) built for this
+`mox` is a Rust CLI (TDD, 336 unit + 4 property + 8 end-to-end tests) built for this
 workstation's reality: 8 cores, limited RAM/disk, an existing `vps-ovh`, and a
 `gh` CLI that is already authenticated.
 
@@ -160,6 +160,7 @@ Useful flags:
 | `mox vps allow <slug> [--note "…"]` | one-time human approval for VPS deployment |
 | `mox vps revoke <slug>` / `mox vps approvals` | revoke / list approvals |
 | `mox notify status` / `mox notify test` | show channels / send a test message |
+| `mox balance [--json] [--notify]` | check DeepSeek credit; notify on a new threshold |
 
 ## Human check queue (the "sidebar")
 
@@ -234,6 +235,36 @@ Channels (all off by default):
 * **Desktop**: `notify_desktop = true` (uses `notify-send`).
 * **Webhook**: `notify_webhook = true` + `webhook_url = "https://…"`; the URL is
   kept out of argv too (ntfy, a custom bot, a Slack proxy...).
+
+
+
+### DeepSeek balance watcher
+
+`mox balance` calls the DeepSeek `/user/balance` endpoint and prints the
+remaining credit. `--notify` sends one Telegram message for each newly crossed
+threshold:
+
+```text
+$10 -> $5 -> $3 -> $2 -> $1 -> $0.50
+```
+
+- The key is read from `DEEPSEEK_API_KEY`, otherwise from the `deepseek`
+  provider in `~/.local/share/opencode/auth.json` (or `~/.config/opencode/auth.json`).
+  It is only written to a 0600 curl config file, never argv or logs.
+- State lives in `~/.local/state/meta-orchestrator/deepseek-balance.json`.
+  A top-up releases the thresholds so a later drop can notify again.
+- The included user timer `contrib/mox-balance.timer` runs every 30 minutes.
+  Install it with:
+
+```bash
+cp contrib/mox-balance.service contrib/mox-balance.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now mox-balance.timer
+```
+
+- The Telegram token can be read from the existing bridge config with
+  `telegram_token_file = "~/.config/opencode/telegram-bridge/config.json"`.
+  mox only sends messages; the bridge keeps polling, so there is no conflict.
 
 ## Design boundary
 
@@ -637,6 +668,9 @@ notify_telegram = false
 allow_remote_bots = false   # hard wall: mox never runs its bot remotely by default
 telegram_chat_id = ""
 telegram_token_env = "MOX_TELEGRAM_TOKEN"
+# Optional 0600 file containing the token, or JSON with a botToken field.
+# The existing OpenCode bridge config is accepted.
+telegram_token_file = ""
 notify_webhook = false
 webhook_url = ""
 ```
@@ -675,7 +709,7 @@ prior.
 Testing:
 
 ```bash
-cargo test                 # 330 unit + 4 property + 8 end-to-end tests
+cargo test                 # 336 unit + 4 property + 8 end-to-end tests
 cargo test --test cli_e2e  # end-to-end only
 cargo clippy --all-targets
 ```

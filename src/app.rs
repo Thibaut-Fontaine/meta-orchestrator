@@ -2,6 +2,7 @@
 //! [`CommandRunner`] or the injected [`Brain`], so the whole workflow can run in
 //! tests with no network, no GitHub and no OpenCode.
 
+use crate::balance;
 use crate::brain::Brain;
 use crate::checks::{self, Check, CheckKind, CheckStore, Priority};
 use crate::clean;
@@ -299,6 +300,7 @@ impl App {
                 bot.run(once)
             }
             Command::Notify { action } => self.cmd_notify(action, out),
+            Command::Balance { json, notify } => self.cmd_balance(json, notify, out),
             Command::Stats { json, reset, yes } => self.cmd_stats(json, reset, yes, out),
             Command::Check {
                 action,
@@ -2492,7 +2494,7 @@ impl App {
     }
 
     fn cmd_completions(&mut self, shell: &str, out: &mut dyn Write) -> Result<()> {
-        let commands = "init doctor plan up status logs reflect clean stop check milestone stats notify vps ideas bot events report project completions";
+        let commands = "init doctor plan up status logs reflect clean stop check milestone stats notify balance vps ideas bot events report project completions";
         match shell {
             "bash" => write!(
                 out,
@@ -2598,6 +2600,103 @@ impl App {
             writeln!(out, "{}", serde_json::to_string_pretty(&summary)?)?;
         } else {
             write!(out, "{}", stats::render(&summary))?;
+        }
+        Ok(())
+    }
+
+    fn cmd_balance(&mut self, json: bool, send_notify: bool, out: &mut dyn Write) -> Result<()> {
+        let key = balance::api_key()?;
+        let current = balance::fetch_balance(self.runner.clone(), &self.cfg, &key)?;
+        let path = balance::BalanceState::path(&self.cfg);
+        let mut state = balance::BalanceState::load(&path)?;
+
+        let crossed = if send_notify {
+            let names = notify::channel_names(self.notifier.as_ref());
+            if names == "none" {
+                bail!(
+                    "no notification channel configured; run `mox notify status` and set \
+                     notify_telegram = true"
+                );
+            }
+            let crossed = balance::crossings(current.total, &mut state.notified);
+            if !crossed.is_empty() {
+                let crossed_text = crossed
+                    .iter()
+                    .map(|value| balance::format_money(*value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let next_text = balance::next_thresholds(current.total)
+                    .iter()
+                    .map(|value| balance::format_money(*value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let title = format!("DeepSeek balance crossed {}", crossed_text);
+                let body = format!(
+                    "Remaining: {} {}\nCrossed: {}\nNext thresholds: {}",
+                    balance::format_money(current.total),
+                    current.currency,
+                    crossed_text,
+                    if next_text.is_empty() {
+                        "none"
+                    } else {
+                        &next_text
+                    }
+                );
+                self.notifier
+                    .send(&Event::new(EventKind::Balance, title, body))?;
+            }
+            crossed
+        } else {
+            Vec::new()
+        };
+
+        state.checked_at = now_rfc3339();
+        state.currency = current.currency.clone();
+        state.last_balance = Some(current.total);
+        state.save(&path)?;
+
+        if json {
+            let payload = serde_json::json!({
+                "currency": current.currency,
+                "total_balance": current.total,
+                "granted_balance": current.granted,
+                "topped_up_balance": current.topped_up,
+                "available": current.available,
+                "thresholds": balance::THRESHOLDS,
+                "crossed": crossed,
+                "notified": state.notified,
+                "checked_at": state.checked_at,
+            });
+            writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
+        } else {
+            writeln!(
+                out,
+                "DeepSeek balance: {} {} remaining (granted {}, topped up {})",
+                balance::format_money(current.total),
+                current.currency,
+                balance::format_money(current.granted),
+                balance::format_money(current.topped_up)
+            )?;
+            writeln!(
+                out,
+                "next thresholds: {}",
+                balance::next_thresholds(current.total)
+                    .iter()
+                    .map(|value| balance::format_money(*value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
+            if !crossed.is_empty() {
+                writeln!(
+                    out,
+                    "notified threshold(s): {}",
+                    crossed
+                        .iter()
+                        .map(|value| balance::format_money(*value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+            }
         }
         Ok(())
     }

@@ -15,6 +15,9 @@
   `mox up --yes` bypasses for automation. Re-planning or adopting resets approval.
 - Explicit `--max-parallel N` now overrides the compute-aware concurrency cap,
   so a heavy project no longer serializes every other selected project.
+- `mox balance [--json] [--notify]` checks the linked DeepSeek credit and
+  notifies once per newly crossed $10/$5/$3/$2/$1/$0.50 threshold. The key and
+  Telegram token stay in 0600 files; a user timer checks every 30 minutes.
 - Every project gets `MANUAL.md` and a "Continue without mox" README section;
   `AGENTS.md` documents direct `MILESTONES.json` edits when mox is unavailable.
 

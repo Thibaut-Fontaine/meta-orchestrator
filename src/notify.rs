@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 use crate::exec::{CommandRunner, CommandSpec};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,7 @@ pub enum EventKind {
     Failed,
     Checks,
     Digest,
+    Balance,
     Test,
 }
 
@@ -35,6 +36,7 @@ impl EventKind {
             EventKind::Failed => "failed",
             EventKind::Checks => "checks",
             EventKind::Digest => "digest",
+            EventKind::Balance => "balance",
             EventKind::Test => "test",
         }
     }
@@ -149,6 +151,7 @@ impl Notifier for DesktopNotifier {
 pub struct TelegramNotifier {
     runner: Arc<dyn CommandRunner>,
     token_env: String,
+    token_file: Option<PathBuf>,
     chat_id: String,
     state_dir: PathBuf,
 }
@@ -163,12 +166,42 @@ impl TelegramNotifier {
         TelegramNotifier {
             runner,
             token_env: token_env.into(),
+            token_file: None,
             chat_id: chat_id.into(),
             state_dir,
         }
     }
 
+    /// Read the token from a 0600 file instead of the environment. The file may
+    /// be a plain token or a JSON object with a `botToken` field (the existing
+    /// OpenCode Telegram bridge config works).
+    pub fn with_token_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.token_file = Some(path.into());
+        self
+    }
+
     fn token(&self) -> Result<String> {
+        if let Some(path) = &self.token_file {
+            let path = crate::util::expand_tilde(&path.display().to_string());
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading Telegram token file {}", path.display()))?;
+            let token = if text.trim_start().starts_with('{') {
+                let value: serde_json::Value = serde_json::from_str(&text)
+                    .with_context(|| format!("parsing Telegram token file {}", path.display()))?;
+                value
+                    .get("botToken")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            } else {
+                text.trim().to_string()
+            };
+            if token.is_empty() {
+                bail!("Telegram token file {} has no botToken", path.display());
+            }
+            return Ok(token);
+        }
         let token = std::env::var(&self.token_env).unwrap_or_default();
         if token.trim().is_empty() {
             bail!("telegram is enabled but ${} is not set", self.token_env);
@@ -333,12 +366,16 @@ pub fn from_config(cfg: &Config, runner: Arc<dyn CommandRunner>) -> Arc<dyn Noti
         channels.push(Arc::new(DesktopNotifier::new(runner.clone())));
     }
     if cfg.notify_telegram && !cfg.telegram_chat_id.trim().is_empty() {
-        channels.push(Arc::new(TelegramNotifier::new(
+        let mut telegram = TelegramNotifier::new(
             runner.clone(),
             cfg.telegram_token_env.clone(),
             cfg.telegram_chat_id.clone(),
             cfg.state_dir_path(),
-        )));
+        );
+        if !cfg.telegram_token_file.trim().is_empty() {
+            telegram = telegram.with_token_file(cfg.telegram_token_file.clone());
+        }
+        channels.push(Arc::new(telegram));
     }
     if cfg.notify_webhook && !cfg.webhook_url.trim().is_empty() {
         channels.push(Arc::new(WebhookNotifier::new(
@@ -480,6 +517,34 @@ mod tests {
             .flatten()
             .collect();
         assert!(leftovers.is_empty(), "temp files must be cleaned up");
+    }
+
+    #[test]
+    fn telegram_can_read_a_token_file_instead_of_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("bridge.json");
+        std::fs::write(&token_file, r#"{"botToken":"file-secret"}"#).unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_for_test = seen.clone();
+        let runner = Arc::new(FakeRunner::new(move |spec| {
+            assert!(!spec.args.iter().any(|arg| arg.contains("file-secret")));
+            let conf = &spec.args[spec.args.len() - 1];
+            *seen_for_test.lock().unwrap() = std::fs::read_to_string(conf).unwrap();
+            Output {
+                code: Some(0),
+                stdout: r#"{"ok":true}"#.into(),
+                ..Output::default()
+            }
+        }));
+        let notifier = TelegramNotifier::new(
+            runner,
+            "MOX_TEST_MISSING_TOKEN_FILE_ENV",
+            "1",
+            dir.path().to_path_buf(),
+        )
+        .with_token_file(token_file);
+        notifier.send(&event()).unwrap();
+        assert!(seen.lock().unwrap().contains("file-secret"));
     }
 
     #[test]
