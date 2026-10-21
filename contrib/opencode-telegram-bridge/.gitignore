@@ -1,0 +1,5 @@
+# Never commit the live bridge config or state: both contain secrets or
+# session/chat identifiers.
+config.json
+*.state.json
+__pycache__/

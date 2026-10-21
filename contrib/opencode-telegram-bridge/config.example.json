@@ -1,0 +1,15 @@
+{
+  "botToken": "",
+  "chatID": null,
+  "server": null,
+  "password": null,
+  "notify": {
+    "finished": true,
+    "permission": true,
+    "error": true,
+    "interrupted": false
+  },
+  "includeSubagents": false,
+  "summaryChars": 600,
+  "replyConfirmation": true
+}

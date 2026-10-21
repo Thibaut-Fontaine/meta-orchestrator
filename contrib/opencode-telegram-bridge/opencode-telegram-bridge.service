@@ -1,0 +1,31 @@
+# Optional user service for the standalone OpenCode Telegram bridge.
+#
+# Install:
+#   mkdir -p ~/.config/opencode/telegram-bridge ~/.config/systemd/user
+#   cp contrib/opencode-telegram-bridge/bridge.py \
+#      contrib/opencode-telegram-bridge/setup.py \
+#      ~/.config/opencode/telegram-bridge/
+#   cp contrib/opencode-telegram-bridge/opencode-telegram-bridge.service \
+#      ~/.config/systemd/user/
+#   python3 ~/.config/opencode/telegram-bridge/setup.py --start
+#
+# The bot token lives in ~/.config/opencode/telegram-bridge/config.json (0600),
+# never in this unit.
+[Unit]
+Description=OpenCode to Telegram bridge
+Documentation=file://%h/.config/opencode/telegram-bridge/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.config/opencode/telegram-bridge/bridge.py
+WorkingDirectory=%h
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
