@@ -31,7 +31,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 BRIDGE_DIR = CONFIG_HOME / "opencode" / "telegram-bridge"
@@ -687,16 +687,26 @@ class Bridge:
                 str(token): entry for token, entry in forms.items() if isinstance(entry, dict)
             }
         if isinstance(form_messages, dict):
-            self.form_by_message = {str(key): str(value) for key, value in form_messages.items()}
+            # Drop routes whose form token did not survive the restart; an old
+            # inline keyboard would otherwise report "expired" forever.
+            self.form_by_message = {
+                str(key): str(value)
+                for key, value in form_messages.items()
+                if str(value) in self.form_by_token
+            }
         if isinstance(permissions, dict):
+            now = time.time()
             self.perm_by_token = {
                 str(token): entry
                 for token, entry in permissions.items()
                 if isinstance(entry, dict)
+                and now - float(entry.get("created", 0) or 0) < 24 * 60 * 60
             }
         if isinstance(permission_messages, dict):
             self.perm_by_message = {
-                str(key): str(value) for key, value in permission_messages.items()
+                str(key): str(value)
+                for key, value in permission_messages.items()
+                if str(value) in self.perm_by_token
             }
         self.form_seen = {
             str(entry.get("formID"))
@@ -708,6 +718,9 @@ class Bridge:
             for entry in self.perm_by_token.values()
             if entry.get("requestID")
         }
+        # Write the filtered routes back once, before the polling threads
+        # start, so a stale keyboard cannot survive another restart.
+        self.persist_pending()
 
     def persist_pending(self):
         with self.pending_lock:
@@ -1510,9 +1523,15 @@ class Bridge:
         data = callback.get("data") or ""
         message = callback.get("message") or {}
         message_id = message.get("message_id")
+        callback_chat_id = (message.get("chat") or {}).get("id")
+        if callback_chat_id is None:
+            callback_chat_id = (callback.get("from") or {}).get("id")
 
-        if self.tg.chat_id is None or (message.get("chat") or {}).get("id") != self.tg.chat_id:
+        if self.tg.chat_id is None or callback_chat_id != self.tg.chat_id:
+            log.info("ignoring callback from unauthorized chat")
             return
+
+        log.info("telegram callback received")
 
         if data.startswith("form:"):
             parts = data.split(":")
@@ -1729,6 +1748,13 @@ class Bridge:
                 return
 
         session_id = self.session_for_message(reply_to_id) if reply_to_id is not None else None
+        if not session_id and reply_to_id is not None:
+            self.tg.send(
+                "This message is not linked to an OpenCode session. "
+                "It may be a mox notification or older than the bridge history. "
+                "Use /sessions and /use N."
+            )
+            return
         if not session_id:
             session_id = self.get_last_session()
         if not session_id:

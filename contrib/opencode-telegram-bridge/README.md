@@ -147,9 +147,13 @@ and fill in the token, or let `setup.py` write it. The live file is mode `600`.
 | `/stop` | Interrupt the selected session. |
 | `/id` | Show the paired chat ID. |
 
-Plain messages go to the selected session. Replying to a finished notification
-goes to the session that produced it. Replying to a question answers the current
-form field; option buttons answer with one tap.
+Plain messages go to the selected session (or the last session that produced a
+notification). Replying to a finished notification goes to the session that
+produced it. Replying to a question answers the current form field; option
+buttons answer with one tap. Stale button routes are dropped on restart so old
+keyboards report an expired question instead of silently doing nothing. A
+reply to an unmapped bot message — including a mox notification — is rejected
+with a warning; it is never sent to the currently selected session by accident.
 
 ## Check and troubleshoot
 

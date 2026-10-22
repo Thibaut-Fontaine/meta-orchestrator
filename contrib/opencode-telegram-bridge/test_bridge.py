@@ -255,6 +255,20 @@ class FormFlowTests(unittest.TestCase):
         )
         self.assertEqual(self.instance.form_by_token, {})
 
+    def test_callback_uses_chat_id_and_answers_the_form(self) -> None:
+        self.instance.notify_form(self.form)
+        token = next(iter(self.instance.form_by_token))
+        self.instance.handle_callback(
+            {
+                "id": "cb1",
+                "from": {"id": 1},
+                "message": {"message_id": 42, "chat": {"id": 1}},
+                "data": f"form:{token}:opt:1",
+            }
+        )
+        self.assertEqual(self.instance.oc.replied, [])
+        self.assertIn("Notes", self.instance.sent[-1][0])
+
     def test_cancel_calls_the_api(self) -> None:
         self.instance.notify_form(self.form)
         token = next(iter(self.instance.form_by_token))
@@ -281,6 +295,15 @@ class FormFlowTests(unittest.TestCase):
             f"form:{token}:opt:1",
         )
         self.assertIn(token, restarted.form_by_token)
+
+    def test_unknown_reply_does_not_fall_back_to_the_last_session(self) -> None:
+        self.instance.state["lastSession"] = "ses_test"
+        self.instance.handle_prompt(
+            "wrong agent",
+            {"message_id": 1, "reply_to_message": {"message_id": 999}},
+        )
+        self.assertEqual(self.instance.oc.prompts, [])
+        self.assertIn("not linked", self.instance.tg.sent[0][0].lower())
 
     def test_stale_form_reply_does_not_become_a_prompt(self) -> None:
         self.instance.form_by_message["99"] = "deadbeef"
